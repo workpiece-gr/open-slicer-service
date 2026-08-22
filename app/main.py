@@ -206,7 +206,7 @@ def _iter_extrusions(path: Path):
     e_absolute = True
     feature = "Unclassified"
     feature_re = re.compile(r";\s*(?:FEATURE|TYPE)\s*:\s*(.+)", re.I)
-    axis_re = re.compile(r"([XYZE])(-?\d+(?:\.\d+)?)")
+    axis_re = re.compile(r"([XYZE])([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)")
     with path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
             if match := feature_re.search(line):
@@ -260,18 +260,7 @@ def sample_toolpath(path: Path, limit: int) -> dict:
             features.append(feature)
         moves.append([round(x1, 3), round(y1, 3), round(x2, 3), round(y2, 3), round(z, 3), feature_id])
     bounds = None if count == 0 else {"min": [min_x, min_y, min_z], "max": [max_x, max_y, max_z]}
-    result = {"features": features, "moves": moves, "bounds": bounds, "total_extrusion_moves": count, "sample_stride": stride}
-    if count == 0:
-        samples = []
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
-                code = line.split(";", 1)[0].strip()
-                if code and "G" in code and ("X" in code or "Y" in code) and "E" in code:
-                    samples.append(code[:240])
-                    if len(samples) == 12:
-                        break
-        result["unparsed_motion_samples"] = samples
-    return result
+    return {"features": features, "moves": moves, "bounds": bounds, "total_extrusion_moves": count, "sample_stride": stride}
 
 
 def find_output(directory: Path) -> Path:

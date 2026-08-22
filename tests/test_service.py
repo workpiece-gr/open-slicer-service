@@ -42,8 +42,8 @@ def test_gcode_summary_and_moves(tmp_path: Path):
         "; estimated printing time (normal mode) = 1h 2m 3s\n"
         "; total filament used [g] = 12.5\n"
         "; total layer number = 2\n"
-        "G90\nM82\nG1 X0 Y0 Z0.2 E0\n; FEATURE: Outer wall\nG1 X10 Y0 E1\n"
-        "; FEATURE: Sparse infill\nG1 X10 Y10 E2\n"
+        "G90\nM83\nG1 X0 Y0 Z0.2 E0\n; FEATURE: Outer wall\nG1 X10 Y0 E.5\n"
+        "; FEATURE: Sparse infill\nG1 X10 Y10 E.5\n"
     )
     summary = parse_gcode_summary(gcode)
     preview = sample_toolpath(gcode, 10)
