@@ -37,15 +37,41 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 SLICE_TIMEOUT_SECONDS = int(os.getenv("SLICE_TIMEOUT_SECONDS", "180"))
 MAX_PREVIEW_MOVES = int(os.getenv("MAX_PREVIEW_MOVES", "30000"))
 
-PROFILE_FILES = {
-    "machine": PROFILE_ROOT / "machine.json",
-    "process": PROFILE_ROOT / "process.json",
-    "filament": PROFILE_ROOT / "filament.json",
+MATERIALS = {
+    "pla": {
+        "label": "PLA",
+        "process": PROFILE_ROOT / "process" / "pla.json",
+        "filament": PROFILE_ROOT / "filament" / "pla.json",
+    },
+    "petg": {
+        "label": "PETG",
+        "process": PROFILE_ROOT / "process" / "petg.json",
+        "filament": PROFILE_ROOT / "filament" / "petg.json",
+    },
+    "pctg": {
+        "label": "PCTG",
+        "process": PROFILE_ROOT / "process" / "pctg.json",
+        "filament": PROFILE_ROOT / "filament" / "pctg.json",
+    },
+    "abs": {
+        "label": "ABS",
+        "process": PROFILE_ROOT / "process" / "abs.json",
+        "filament": PROFILE_ROOT / "filament" / "abs.json",
+    },
+    "tpu": {
+        "label": "TPU",
+        "process": PROFILE_ROOT / "process" / "tpu.json",
+        "filament": PROFILE_ROOT / "filament" / "tpu.json",
+    },
 }
+PROFILE_FILES = {"machine": PROFILE_ROOT / "machine.json"}
+for material_key, material_profile in MATERIALS.items():
+    PROFILE_FILES[f"{material_key}_process"] = material_profile["process"]
+    PROFILE_FILES[f"{material_key}_filament"] = material_profile["filament"]
 
 app = FastAPI(
     title="Open Slicer Service",
-    version="0.1.0",
+    version="0.2.0",
     license_info={"name": "GNU AGPL-3.0-or-later", "url": "https://www.gnu.org/licenses/agpl-3.0.html"},
 )
 
@@ -76,17 +102,22 @@ def root() -> dict:
         "license": "AGPL-3.0-or-later",
         "source": SOURCE_CODE_URL or None,
         "docs": "/docs",
+        "printer": "RatRig V-Core 3 300 / 0.4 mm nozzle",
+        "materials": {key: profile["label"] for key, profile in MATERIALS.items()},
     }
 
 
 @app.get("/health")
 def health() -> dict:
+    engine_ready = ORCA_BIN.is_file()
+    profile_state = profiles_ready()
+    source_ready = source_url_is_public()
     return {
-        "ok": ORCA_BIN.is_file(),
+        "ok": engine_ready and profile_state and source_ready,
         "engine": f"OrcaSlicer {ORCA_VERSION}",
-        "engine_ready": ORCA_BIN.is_file(),
-        "profiles_ready": profiles_ready(),
-        "source_ready": source_url_is_public(),
+        "engine_ready": engine_ready,
+        "profiles_ready": profile_state,
+        "source_ready": source_ready,
         "profile_files": {name: path.is_file() for name, path in PROFILE_FILES.items()},
     }
 
@@ -98,16 +129,23 @@ def source() -> RedirectResponse:
     return RedirectResponse(SOURCE_CODE_URL, status_code=307)
 
 
-def build_process_profile(base_path: Path, quality: str, strength: str, destination: Path) -> dict:
+def build_process_profile(
+    base_path: Path,
+    quality: str,
+    strength: str,
+    destination: Path,
+    material_label: str = "",
+) -> dict:
     try:
         profile = json.loads(base_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Invalid process profile: {exc}") from exc
     if profile.get("type") != "process":
-        raise RuntimeError("profiles/process.json must have type=process")
+        raise RuntimeError(f"{base_path} must have type=process")
+    material_prefix = f"{material_label} / " if material_label else ""
     profile.update(
         {
-            "name": f"Open Slicer {QUALITY[quality]['label']} / {STRENGTH[strength]['label']}",
+            "name": f"Open Slicer {material_prefix}{QUALITY[quality]['label']} / {STRENGTH[strength]['label']}",
             "from": "user",
             "instantiation": "true",
             "layer_height": QUALITY[quality]["layer_height"],
@@ -235,9 +273,12 @@ def find_output(directory: Path) -> Path:
 @app.post("/v1/slice")
 async def slice_model(
     file: Annotated[UploadFile, File(description="Single-colour STL")],
+    material: Annotated[str, Form()] = "pla",
     quality: Annotated[str, Form()] = "balanced",
     strength: Annotated[str, Form()] = "functional",
 ) -> dict:
+    if material not in MATERIALS:
+        raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
     if quality not in QUALITY:
         raise HTTPException(status_code=422, detail=f"quality must be one of: {', '.join(QUALITY)}")
     if strength not in STRENGTH:
@@ -251,6 +292,7 @@ async def slice_model(
         missing = [name for name, path in PROFILE_FILES.items() if not path.is_file()]
         raise HTTPException(status_code=503, detail=f"Validated profiles are not installed: {', '.join(missing)}")
 
+    material_profile = MATERIALS[material]
     with tempfile.TemporaryDirectory(prefix="open-slice-") as temporary:
         job = Path(temporary)
         input_path = job / "input.stl"
@@ -258,7 +300,13 @@ async def slice_model(
         output_dir.mkdir()
         upload_size = await save_upload(file, input_path)
         process_path = job / "process.json"
-        effective = build_process_profile(PROFILE_FILES["process"], quality, strength, process_path)
+        effective = build_process_profile(
+            material_profile["process"],
+            quality,
+            strength,
+            process_path,
+            str(material_profile["label"]),
+        )
         settings_arg = f"{PROFILE_FILES['machine']};{process_path}"
         xdg_root = job / "xdg"
         xdg_config, xdg_cache, xdg_data = xdg_root / "config", xdg_root / "cache", xdg_root / "data"
@@ -272,7 +320,7 @@ async def slice_model(
             "--ensure-on-bed",
             "--allow-newer-file",
             "--load-settings", settings_arg,
-            "--load-filaments", str(PROFILE_FILES["filament"]),
+            "--load-filaments", str(material_profile["filament"]),
             "--outputdir", str(output_dir),
             str(input_path),
         ]
@@ -314,8 +362,15 @@ async def slice_model(
         preview = sample_toolpath(gcode, MAX_PREVIEW_MOVES)
         return {
             "engine": {"name": "OrcaSlicer", "version": ORCA_VERSION, "license": "AGPL-3.0", "source": SOURCE_CODE_URL or None},
-            "request": {"filename": Path(filename).name, "upload_bytes": upload_size, "quality": quality, "strength": strength},
+            "request": {
+                "filename": Path(filename).name,
+                "upload_bytes": upload_size,
+                "material": material,
+                "quality": quality,
+                "strength": strength,
+            },
             "effective_process": {
+                "material": material_profile["label"],
                 "layer_height_mm": float(effective["layer_height"]),
                 "wall_loops": int(effective["wall_loops"]),
                 "infill_percent": 20,
@@ -325,6 +380,6 @@ async def slice_model(
             "gcode_sha256": hashlib.sha256(gcode.read_bytes()).hexdigest(),
             "warnings": [
                 "Sampled preview moves are for visualisation; validate production G-code in OrcaSlicer desktop.",
-                "The pilot accepts one STL and one filament only.",
+                "The pilot accepts one STL and one selected material profile per request.",
             ],
         }

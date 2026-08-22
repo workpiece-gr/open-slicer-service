@@ -14,6 +14,19 @@ def test_process_profile_maps_quality_and_strength(tmp_path: Path):
     assert result["sparse_infill_density"] == "20%"
 
 
+def test_resolved_profile_matrix():
+    profile_root = Path(__file__).parents[1] / "profiles"
+    expected = {
+        profile_root / "machine.json": "machine",
+        **{profile_root / "process" / f"{name}.json": "process" for name in ("pla", "petg", "pctg", "abs", "tpu")},
+        **{profile_root / "filament" / f"{name}.json": "filament" for name in ("pla", "petg", "pctg", "abs", "tpu")},
+    }
+    for path, profile_type in expected.items():
+        profile = json.loads(path.read_text(encoding="utf-8"))
+        assert profile["type"] == profile_type
+        assert "inherits" not in profile
+
+
 def test_duration_parser():
     assert parse_duration_seconds("1h 2m 3s") == 3723
     assert parse_duration_seconds("45m 8s") == 2708

@@ -1,15 +1,15 @@
-# Profiles required
+# Resolved RatRig profiles
 
-Place three JSON files exported or copied from the pinned OrcaSlicer version here:
+These profiles resolve the uploaded `RatRig V-Core 3 300 0.4 nozzle - Copy` OrcaSlicer bundle against the matching upstream OrcaSlicer 2.4.2 RatRig and System bases.
 
-- `machine.json` — the exact printer and nozzle profile
-- `process.json` — the base process profile
-- `filament.json` — the exact filament profile
+- `machine.json` — RatRig V-Core 3, 300 × 300 × 300 mm, 0.4 mm nozzle
+- `process/{pla,petg,pctg,abs,tpu}.json` — material-specific base process settings
+- `filament/{pla,petg,pctg,abs,tpu}.json` — material-specific filament settings
 
-The service copies and patches `process.json` per request. It changes only:
+The service copies the selected process profile per request and changes only:
 
 - `layer_height` from quality
 - `wall_loops` from strength
 - `sparse_infill_density` to `20%`
 
-Do not use inherited fragments by themselves. Use complete/resolved profiles that slice a test cube successfully with OrcaSlicer 2.4.2. Profiles in this folder become part of the public corresponding source, so remove credentials, private notes and network printer secrets before committing them.
+All `inherits` chains have been flattened so the container does not depend on OrcaSlicer desktop user data. Printer-host fields were removed before publication. Validate the generated G-code with a controlled print before using these settings for customer parts.
