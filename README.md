@@ -29,8 +29,8 @@ Start with the exact printer, 0.4 mm nozzle and filament you will quote. Validat
 ```bash
 docker build -t open-slicer-service .
 docker run --rm -p 8080:8080 \
-  -e SOURCE_CODE_URL=https://github.com/YOUR-NAME/open-slicer-service \
-  -e ALLOWED_ORIGINS=https://YOUR-SITE.example \
+  -e SOURCE_CODE_URL=https://github.com/qruret/open-slicer-service \
+  -e ALLOWED_ORIGINS=https://garagefab-prototype.chr-a-karagiannis.chatgpt.site \
   open-slicer-service
 ```
 
@@ -70,8 +70,8 @@ Quality controls layer height; strength controls wall count. Infill remains fixe
 3. Add these variables in the service settings:
 
 ```text
-SOURCE_CODE_URL=https://github.com/YOUR-NAME/open-slicer-service
-ALLOWED_ORIGINS=https://YOUR-SITE.example
+SOURCE_CODE_URL=https://github.com/qruret/open-slicer-service
+ALLOWED_ORIGINS=https://garagefab-prototype.chr-a-karagiannis.chatgpt.site
 MAX_UPLOAD_BYTES=52428800
 SLICE_TIMEOUT_SECONDS=180
 MAX_PREVIEW_MOVES=30000
