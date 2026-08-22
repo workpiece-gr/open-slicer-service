@@ -96,7 +96,7 @@
     "0.2"
   ],
   "compatible_printers": [
-    "Open Slicer RatRig V-Core 3 300 0.4"
+    "RatRig V-Core 3 300 0.4 nozzle"
   ],
   "filament_settings_id": [
     "SHIRT TPU"

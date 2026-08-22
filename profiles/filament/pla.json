@@ -93,7 +93,7 @@
   "renamed_from": "My Generic PLA",
   "setting_id": "RcBNzytWgwRrwXXz",
   "compatible_printers": [
-    "Open Slicer RatRig V-Core 3 300 0.4"
+    "RatRig V-Core 3 300 0.4 nozzle"
   ],
   "dont_slow_down_outer_wall": [
     "1"

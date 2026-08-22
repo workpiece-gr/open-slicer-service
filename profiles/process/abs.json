@@ -9,7 +9,7 @@
   "bridge_speed": "25",
   "brim_width": "10",
   "compatible_printers": [
-    "Open Slicer RatRig V-Core 3 300 0.4"
+    "RatRig V-Core 3 300 0.4 nozzle"
   ],
   "print_sequence": "by layer",
   "default_acceleration": "8000",

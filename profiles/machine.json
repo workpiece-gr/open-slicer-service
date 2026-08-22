@@ -1,6 +1,6 @@
 {
   "type": "machine",
-  "name": "Open Slicer RatRig V-Core 3 300 0.4",
+  "name": "RatRig V-Core 3 300 0.4 nozzle",
   "from": "user",
   "instantiation": "true",
   "printer_technology": "FFF",

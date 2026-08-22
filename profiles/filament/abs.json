@@ -88,7 +88,7 @@
   "setting_id": "W0LP8Ah5MHMzogvV",
   "filament_id": "OGFB99",
   "compatible_printers": [
-    "Open Slicer RatRig V-Core 3 300 0.4"
+    "RatRig V-Core 3 300 0.4 nozzle"
   ],
   "filament_end_gcode": [
     "; filament end gcode\nSET_FAN_SPEED FAN=bentobox SPEED=0"
