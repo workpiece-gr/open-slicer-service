@@ -12,4 +12,4 @@ The service copies the selected process profile per request and changes only:
 - `wall_loops` from strength
 - `sparse_infill_density` to `20%`
 
-All `inherits` chains have been flattened so the container does not depend on OrcaSlicer desktop user data. Printer-host fields were removed before publication. Validate the generated G-code with a controlled print before using these settings for customer parts.
+All inherited values have been flattened so the container does not depend on OrcaSlicer desktop user data. The `inherits` strings remain as identity metadata because OrcaSlicer's CLI uses the machine marker for compatibility checks; no external preset lookup is required. Printer-host fields were removed before publication. Validate the generated G-code with a controlled print before using these settings for customer parts.

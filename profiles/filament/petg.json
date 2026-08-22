@@ -2,6 +2,7 @@
   "type": "filament",
   "name": "Open Slicer PETG",
   "from": "user",
+  "inherits": "Generic PETG @System",
   "instantiation": "true",
   "cool_plate_temp": [
     "60"

@@ -2,6 +2,7 @@
   "type": "process",
   "name": "Open Slicer TPU base",
   "from": "user",
+  "inherits": "0.20mm Standard @RatRig",
   "instantiation": "true",
   "adaptive_layer_height": "0",
   "reduce_crossing_wall": "1",

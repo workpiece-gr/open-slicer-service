@@ -2,6 +2,7 @@
   "type": "filament",
   "name": "Open Slicer PLA",
   "from": "user",
+  "inherits": "Generic PLA @System",
   "instantiation": "true",
   "fan_cooling_layer_time": [
     "100"

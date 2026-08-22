@@ -1,7 +1,8 @@
 {
   "type": "machine",
-  "name": "RatRig V-Core 3 300 0.4 nozzle",
+  "name": "RatRig V-Core 3 300 0.4 nozzle - Copy",
   "from": "user",
+  "inherits": "RatRig V-Core 3 300 0.4 nozzle",
   "instantiation": "true",
   "printer_technology": "FFF",
   "deretraction_speed": [

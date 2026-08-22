@@ -2,6 +2,7 @@
   "type": "filament",
   "name": "Open Slicer ABS",
   "from": "user",
+  "inherits": "Generic ABS @System",
   "instantiation": "true",
   "cool_plate_temp": [
     "105"

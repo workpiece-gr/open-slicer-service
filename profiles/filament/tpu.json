@@ -2,6 +2,7 @@
   "type": "filament",
   "name": "Open Slicer TPU",
   "from": "user",
+  "inherits": "RatRig Generic TPU",
   "instantiation": "true",
   "cool_plate_temp": [
     "30"
