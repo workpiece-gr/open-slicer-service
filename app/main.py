@@ -71,7 +71,7 @@ for material_key, material_profile in MATERIALS.items():
 
 app = FastAPI(
     title="Open Slicer Service",
-    version="0.2.0",
+    version="0.3.0",
     license_info={"name": "GNU AGPL-3.0-or-later", "url": "https://www.gnu.org/licenses/agpl-3.0.html"},
 )
 
@@ -276,6 +276,7 @@ async def slice_model(
     material: Annotated[str, Form()] = "pla",
     quality: Annotated[str, Form()] = "balanced",
     strength: Annotated[str, Form()] = "functional",
+    preoriented: Annotated[bool, Form()] = False,
 ) -> dict:
     if material not in MATERIALS:
         raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
@@ -316,14 +317,17 @@ async def slice_model(
             "xvfb-run", "-a", str(ORCA_BIN),
             "--slice", "0",
             "--arrange", "1",
-            "--orient", "1",
+        ]
+        if not preoriented:
+            command.extend(["--orient", "1"])
+        command.extend([
             "--ensure-on-bed",
             "--allow-newer-file",
             "--load-settings", settings_arg,
             "--load-filaments", str(material_profile["filament"]),
             "--outputdir", str(output_dir),
             str(input_path),
-        ]
+        ])
         try:
             completed = subprocess.run(
                 command,
@@ -368,6 +372,7 @@ async def slice_model(
                 "material": material,
                 "quality": quality,
                 "strength": strength,
+                "preoriented": preoriented,
             },
             "effective_process": {
                 "material": material_profile["label"],
