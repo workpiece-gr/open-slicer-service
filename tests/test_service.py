@@ -16,6 +16,7 @@ def test_process_profile_maps_quality_and_strength(tmp_path: Path):
 
 def test_resolved_profile_matrix():
     profile_root = Path(__file__).parents[1] / "profiles"
+    machine = json.loads((profile_root / "machine.json").read_text(encoding="utf-8"))
     expected = {
         profile_root / "machine.json": "machine",
         **{profile_root / "process" / f"{name}.json": "process" for name in ("pla", "petg", "pctg", "abs", "tpu")},
@@ -25,6 +26,8 @@ def test_resolved_profile_matrix():
         profile = json.loads(path.read_text(encoding="utf-8"))
         assert profile["type"] == profile_type
         assert "inherits" not in profile
+        if profile_type in {"process", "filament"}:
+            assert machine["name"] in profile["compatible_printers"]
 
 
 def test_duration_parser():
