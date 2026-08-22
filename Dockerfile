@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl python3 python3-venv xvfb \
-      libdbus-1-3 libegl1 libgl1 libglib2.0-0t64 libgtk-3-0t64 \
+      libdbus-1-3 libegl1 libgl1 libglu1-mesa libopengl0 libglib2.0-0t64 libgtk-3-0t64 \
       libwebkit2gtk-4.1-0 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
       libx11-6 libxext6 libxi6 libxkbcommon0 libxkbcommon-x11-0 libxrender1 \
     && rm -rf /var/lib/apt/lists/*
