@@ -29,8 +29,8 @@ Validate the resulting G-code in the OrcaSlicer desktop preview and with control
 ```bash
 docker build -t open-slicer-service .
 docker run --rm -p 8080:8080 \
-  -e SOURCE_CODE_URL=https://github.com/qruret/open-slicer-service \
-  -e ALLOWED_ORIGINS=https://garagefab-prototype.chr-a-karagiannis.chatgpt.site \
+  -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+  -e ALLOWED_ORIGINS=https://workpiece.gr,https://www.workpiece.gr \
   open-slicer-service
 ```
 
@@ -73,8 +73,8 @@ Supported material keys are `pla`, `petg`, `pctg`, `abs`, and `tpu`.
 3. Add these variables in the service settings:
 
 ```text
-SOURCE_CODE_URL=https://github.com/qruret/open-slicer-service
-ALLOWED_ORIGINS=https://garagefab-prototype.chr-a-karagiannis.chatgpt.site
+SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service
+ALLOWED_ORIGINS=https://workpiece.gr,https://www.workpiece.gr
 MAX_UPLOAD_BYTES=52428800
 SLICE_TIMEOUT_SECONDS=180
 MAX_PREVIEW_MOVES=30000
