@@ -204,6 +204,7 @@ def build_process_profile(
     automatic_supports: bool = False,
     project_reopen_safe: bool = False,
     single_colour_project: bool = False,
+    project_unrestricted_compatibility: bool = False,
 ) -> dict:
     try:
         profile = json.loads(base_path.read_text(encoding="utf-8"))
@@ -246,6 +247,9 @@ def build_process_profile(
         layer_change_gcode = str(profile.get("layer_change_gcode") or "")
         if "G92 E0" not in layer_change_gcode:
             profile["layer_change_gcode"] = (layer_change_gcode.rstrip() + "\nG92 E0").lstrip()
+    if project_unrestricted_compatibility:
+        profile.pop("compatible_printers", None)
+        profile.pop("compatible_printers_condition", None)
     destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return profile
 
@@ -297,6 +301,25 @@ def build_ratrig_project_machine(destination: Path) -> dict:
             "printable_height": "300",
         }
     )
+    destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return profile
+
+
+def build_ratrig_project_filament(source: Path, destination: Path) -> dict:
+    try:
+        profile = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid Workpiece RatRig filament profile: {exc}") from exc
+    if profile.get("type") != "filament":
+        raise RuntimeError("The Workpiece RatRig filament profile must have type=filament")
+    # Project export uses a standalone, fully-resolved machine shell. The
+    # original user filament's compatibility list points at the inherited
+    # system preset, so remove only that gate while preserving all material
+    # settings.
+    profile.pop("compatible_printers", None)
+    profile.pop("compatible_printers_condition", None)
+    profile["from"] = "user"
+    profile["instantiation"] = "true"
     destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return profile
 
@@ -360,7 +383,8 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
         machine_path = job / "ratrig-project-machine.json"
         build_ratrig_project_machine(machine_path)
         process_base = material_profile["process"]
-        filament_path = material_profile["filament"]
+        filament_path = job / "ratrig-project-filament.json"
+        build_ratrig_project_filament(material_profile["filament"], filament_path)
     elif printer == "ender3_generic_235":
         if material not in ENDER_GENERIC_FILAMENTS:
             raise HTTPException(status_code=422, detail=f"The temporary Ender 3 profile does not yet support {material.upper()}.")
@@ -386,6 +410,7 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
         automatic_supports=True,
         project_reopen_safe=True,
         single_colour_project=True,
+        project_unrestricted_compatibility=printer == "ratrig_vcore3_300",
     )
     return machine_path, process_path, filament_path
 
