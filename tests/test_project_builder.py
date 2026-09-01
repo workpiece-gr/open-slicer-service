@@ -115,7 +115,7 @@ def test_automatic_project_supports_convert_manual_tree_support(tmp_path: Path):
     assert result["enable_support"] == "1"
     assert result["support_type"] == "tree(auto)"
     assert result["support_on_build_plate_only"] == "0"
-    assert "G92 E0" in result["layer_gcode"]
+    assert "G92 E0" in result["layer_change_gcode"]
 
 
 def test_project_reopen_safety_preserves_existing_layer_gcode(tmp_path: Path):
@@ -128,7 +128,7 @@ def test_project_reopen_safety_preserves_existing_layer_gcode(tmp_path: Path):
                 "name": "Base",
                 "layer_height": "0.2",
                 "wall_loops": "2",
-                "layer_gcode": "M117 Layer change",
+                "layer_change_gcode": "M117 Layer change",
             }
         )
     )
@@ -139,5 +139,5 @@ def test_project_reopen_safety_preserves_existing_layer_gcode(tmp_path: Path):
         destination,
         project_reopen_safe=True,
     )
-    assert result["layer_gcode"].startswith("M117 Layer change")
-    assert result["layer_gcode"].strip().endswith("G92 E0")
+    assert result["layer_change_gcode"].startswith("M117 Layer change")
+    assert result["layer_change_gcode"].strip().endswith("G92 E0")
