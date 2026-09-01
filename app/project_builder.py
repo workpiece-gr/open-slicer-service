@@ -134,7 +134,7 @@ def build_project_command(
     # exactly the mode needed for an unsliced editable project export. Supplying
     # one STL path per ordered instance avoids coupling project creation to
     # --slice and keeps the output editable instead of producing .gcode.3mf.
-    return [
+    command = [
         "xvfb-run", "-a", str(orca_bin),
         "--arrange", "1",
         "--orient", "1",
@@ -142,9 +142,22 @@ def build_project_command(
         "--allow-newer-file",
         "--load-settings", f"{machine_profile};{process_profile}",
         "--load-filaments", str(filament_profile),
-        "--export-3mf", str(project_path),
-        *(str(source) for source in sources),
     ]
+    # OrcaSlicer 2.4.2 can export a lone STL without assigning its only
+    # instance to a printable plate for some user machine profiles (observed
+    # with the RatRig profile). Reopening that otherwise valid project then
+    # fails with CLI_NO_SUITABLE_OBJECTS. --assemble rebuilds the single model
+    # with an explicit instance before the arrange/export pass, while keeping
+    # one build item and the same mesh geometry.
+    if len(sources) == 1:
+        command.append("--assemble")
+    command.extend(
+        [
+            "--export-3mf", str(project_path),
+            *(str(source) for source in sources),
+        ]
+    )
+    return command
 
 
 def verify_project_command(*, orca_bin: Path, project_path: Path, output_dir: Path) -> list[str]:
