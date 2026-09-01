@@ -597,7 +597,6 @@ async def build_project(
             try:
                 layout_repair = repair_project_plate_layout(
                     project_path,
-                    source_dimensions_mm=inspection["dimensions_mm"],
                     envelope_mm=PROJECT_PRINTERS[selected_printer]["envelope_mm"],
                 )
             except ValueError as exc:
@@ -736,11 +735,20 @@ async def slice_model(
         raise HTTPException(status_code=415, detail="The pilot Orca service accepts STL files only.")
     if not ORCA_BIN.is_file():
         raise HTTPException(status_code=503, detail="The pinned OrcaSlicer binary is not available.")
-    if not profiles_ready():
-        missing = [name for name, path in PROFILE_FILES.items() if not path.is_file()]
-        raise HTTPException(status_code=503, detail=f"Validated profiles are not installed: {', '.join(missing)}")
-    if printer == "ender3_generic_235" and not ender_generic_profiles_ready():
-        raise HTTPException(status_code=503, detail="The pinned OrcaSlicer Ender 3 generic profiles are not available.")
+    if printer == "ratrig_vcore3_300":
+        if not profiles_ready():
+            missing = [name for name, path in PROFILE_FILES.items() if not path.is_file()]
+            raise HTTPException(status_code=503, detail=f"Validated RatRig profiles are not installed: {', '.join(missing)}")
+    else:
+        required = (
+            ENDER_GENERIC_MACHINE,
+            ENDER_GENERIC_PROCESS,
+            ENDER_GENERIC_FILAMENT_COMMON,
+            ENDER_GENERIC_FILAMENT_BASES[material],
+            ENDER_GENERIC_FILAMENTS[material],
+        )
+        if any(not path.is_file() or path.stat().st_size <= 20 for path in required):
+            raise HTTPException(status_code=503, detail="The pinned OrcaSlicer Ender 3 generic profiles for the requested material are not available.")
 
     material_profile = MATERIALS[material]
     with tempfile.TemporaryDirectory(prefix="open-slice-") as temporary:
