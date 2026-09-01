@@ -571,6 +571,18 @@ async def build_project(
         if not project_inspection["embedded"]["project_settings"]:
             raise HTTPException(status_code=422, detail="The exported 3MF did not embed project settings.")
 
+        if os.getenv("ORCA_DEBUG_LOGS") == "1":
+            import zipfile
+            print("ORCA DEBUG project inspection:", project_inspection, flush=True)
+            try:
+                with zipfile.ZipFile(project_path) as archive:
+                    for debug_name in ("3D/3dmodel.model", "Metadata/model_settings.config", "Metadata/project_settings.config"):
+                        if debug_name in archive.namelist():
+                            debug_text = archive.read(debug_name).decode("utf-8", errors="ignore")
+                            print(f"ORCA DEBUG {debug_name}:\n{debug_text[:16000]}", flush=True)
+            except Exception as exc:
+                print("ORCA DEBUG project archive inspection failed:", repr(exc), flush=True)
+
         verification_dir = job / "verify"
         verification_dir.mkdir()
         verify_command = verify_project_command(orca_bin=ORCA_BIN, project_path=project_path, output_dir=verification_dir)
