@@ -428,6 +428,36 @@ def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]
             print("ORCA DEBUG command:", " ".join(command), flush=True)
             print("ORCA DEBUG stdout:", (completed.stdout or "")[-10000:], flush=True)
             print("ORCA DEBUG stderr:", (completed.stderr or "")[-10000:], flush=True)
+            if "--outputdir" in command:
+                try:
+                    output_dir = Path(command[command.index("--outputdir") + 1])
+                    result_file = output_dir / "result.json"
+                    if result_file.is_file():
+                        print("ORCA DEBUG result.json:", result_file.read_text(encoding="utf-8", errors="ignore")[-8000:], flush=True)
+                    for gcode in sorted(output_dir.glob("*.gcode"))[:4]:
+                        axis_re = re.compile(r"([XY])([+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+))")
+                        minimum = {"X": math.inf, "Y": math.inf}
+                        maximum = {"X": -math.inf, "Y": -math.inf}
+                        suspicious = []
+                        with gcode.open("r", encoding="utf-8", errors="ignore") as handle:
+                            for line in handle:
+                                code = line.split(";", 1)[0].strip()
+                                if not (code.startswith("G0 ") or code.startswith("G1 ")):
+                                    continue
+                                for axis, raw_value in axis_re.findall(code):
+                                    value = float(raw_value)
+                                    minimum[axis] = min(minimum[axis], value)
+                                    maximum[axis] = max(maximum[axis], value)
+                                    if (value < -0.01 or value > 300.01) and len(suspicious) < 40:
+                                        suspicious.append(code)
+                        print(
+                            "ORCA DEBUG gcode XY:",
+                            gcode.name,
+                            {"min": minimum, "max": maximum, "suspicious": suspicious},
+                            flush=True,
+                        )
+                except Exception as debug_exc:
+                    print("ORCA DEBUG output inspection failed:", repr(debug_exc), flush=True)
         raise HTTPException(status_code=422, detail="OrcaSlicer could not build or verify the requested project.")
     return completed
 
