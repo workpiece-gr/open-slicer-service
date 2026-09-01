@@ -131,6 +131,11 @@ def profiles_ready() -> bool:
     return all(path.is_file() and path.stat().st_size > 20 for path in PROFILE_FILES.values())
 
 
+def ender_generic_profiles_ready() -> bool:
+    paths = [ENDER_GENERIC_MACHINE, ENDER_GENERIC_PROCESS, *ENDER_GENERIC_FILAMENTS.values()]
+    return all(path.is_file() and path.stat().st_size > 20 for path in paths)
+
+
 @app.get("/")
 def root() -> dict:
     return {
@@ -158,7 +163,7 @@ def health() -> dict:
         "profile_files": {name: path.is_file() for name, path in PROFILE_FILES.items()},
         "project_3mf": {
             "experimental": True,
-            "ender_generic_profiles_ready": ENDER_GENERIC_MACHINE.is_file() and ENDER_GENERIC_PROCESS.is_file() and all(path.is_file() for path in ENDER_GENERIC_FILAMENTS.values()),
+            "ender_generic_profiles_ready": ender_generic_profiles_ready(),
             "printers": {key: {"label": value["label"], "envelope_mm": value["envelope_mm"], "temporary_generic": value["temporary_generic"]} for key, value in PROJECT_PRINTERS.items()},
         },
     }
@@ -606,6 +611,8 @@ async def slice_model(
     if not profiles_ready():
         missing = [name for name, path in PROFILE_FILES.items() if not path.is_file()]
         raise HTTPException(status_code=503, detail=f"Validated profiles are not installed: {', '.join(missing)}")
+    if printer == "ender3_generic_235" and not ender_generic_profiles_ready():
+        raise HTTPException(status_code=503, detail="The pinned OrcaSlicer Ender 3 generic profiles are not available.")
 
     material_profile = MATERIALS[material]
     with tempfile.TemporaryDirectory(prefix="open-slice-") as temporary:
