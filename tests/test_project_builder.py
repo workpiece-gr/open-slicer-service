@@ -206,8 +206,14 @@ def test_repair_project_plate_layout_centers_instances_and_builds_plate_membersh
            xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
            requiredextensions="p">
       <resources>
-        <object id="2" type="model"><mesh /></object>
-        <object id="4" type="model"><mesh /></object>
+        <object id="2" type="model"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="250" y="0" z="0"/>
+          <vertex x="250" y="20" z="20"/><vertex x="0" y="20" z="20"/>
+        </vertices></mesh></object>
+        <object id="4" type="model"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="250" y="0" z="0"/>
+          <vertex x="250" y="20" z="20"/><vertex x="0" y="20" z="20"/>
+        </vertices></mesh></object>
       </resources>
       <build>
         <item objectid="2" transform="1 0 0 0 1 0 0 0 1 125 -70 0" printable="1"/>
