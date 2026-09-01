@@ -162,6 +162,7 @@ def build_project_command(
     filament_profile: Path,
     sources: list[Path],
     project_path: Path,
+    auto_orient: bool = True,
 ) -> list[str]:
     if not sources:
         raise ValueError("At least one STL source is required.")
@@ -172,7 +173,7 @@ def build_project_command(
     command = [
         "xvfb-run", "-a", str(orca_bin),
         "--arrange", "1",
-        "--orient", "1",
+        *(["--orient", "1"] if auto_orient else ["--orient", "0"]),
         "--ensure-on-bed",
         "--allow-newer-file",
         "--load-settings", f"{machine_profile};{process_profile}",
