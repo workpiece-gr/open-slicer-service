@@ -9,6 +9,7 @@ from app.project_builder import (
     fits_axis_permutation,
     inspect_project_3mf,
     inspect_stl,
+    patch_project_settings,
     verify_project_command,
 )
 
@@ -181,3 +182,17 @@ def test_project_reopen_safety_preserves_existing_layer_gcode(tmp_path: Path):
     )
     assert result["layer_change_gcode"].startswith("M117 Layer change")
     assert result["layer_change_gcode"].strip().endswith("G92 E0")
+
+
+def test_patch_project_settings_preserves_archive_and_updates_machine_structure(tmp_path: Path):
+    project = tmp_path / "patch.3mf"
+    with zipfile.ZipFile(project, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("Metadata/project_settings.config", json.dumps({"printer_structure": "i3", "printable_height": "300"}))
+        archive.writestr("3D/3dmodel.model", "<model/>")
+    patch_project_settings(project, {"printer_structure": "corexy"})
+    with zipfile.ZipFile(project) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["printer_structure"] == "corexy"
+        assert settings["printable_height"] == "300"
+        assert archive.read("3D/3dmodel.model") == b"<model/>"
