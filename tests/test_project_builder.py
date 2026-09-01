@@ -65,6 +65,18 @@ def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Pa
     assert "--assemble" in single
     assert sum(str(value).endswith(".stl") for value in single) == 1
 
+    no_orient = build_project_command(
+        orca_bin=Path("/opt/orca/AppRun"),
+        machine_profile=tmp_path / "machine.json",
+        process_profile=tmp_path / "process.json",
+        filament_profile=tmp_path / "filament.json",
+        sources=[tmp_path / "source-no-orient.stl"],
+        project_path=tmp_path / "workpiece-no-orient.3mf",
+        auto_orient=False,
+    )
+    orient_index = no_orient.index("--orient")
+    assert no_orient[orient_index + 1] == "0"
+
     verify = verify_project_command(
         orca_bin=Path("/opt/orca/AppRun"),
         project_path=tmp_path / "workpiece-production.3mf",
