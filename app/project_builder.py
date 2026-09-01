@@ -125,11 +125,16 @@ def build_project_command(
     machine_profile: Path,
     process_profile: Path,
     filament_profile: Path,
-    source: Path,
+    sources: list[Path],
     project_path: Path,
-    quantity: int,
 ) -> list[str]:
-    command = [
+    if not sources:
+        raise ValueError("At least one STL source is required.")
+    # OrcaSlicer 2.4.2 rejects --repetitions when plate_to_slice is 0, which is
+    # exactly the mode needed for an unsliced editable project export. Supplying
+    # one STL path per ordered instance avoids coupling project creation to
+    # --slice and keeps the output editable instead of producing .gcode.3mf.
+    return [
         "xvfb-run", "-a", str(orca_bin),
         "--arrange", "1",
         "--orient", "1",
@@ -137,14 +142,9 @@ def build_project_command(
         "--allow-newer-file",
         "--load-settings", f"{machine_profile};{process_profile}",
         "--load-filaments", str(filament_profile),
-    ]
-    if quantity > 1:
-        command.extend(["--repetitions", str(quantity)])
-    command.extend([
         "--export-3mf", str(project_path),
-        str(source),
-    ])
-    return command
+        *(str(source) for source in sources),
+    ]
 
 
 def verify_project_command(*, orca_bin: Path, project_path: Path, output_dir: Path) -> list[str]:
