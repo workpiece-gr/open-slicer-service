@@ -1,0 +1,116 @@
+import json
+import struct
+import zipfile
+from pathlib import Path
+
+from app.main import build_process_profile
+from app.project_builder import (
+    build_project_command,
+    fits_axis_permutation,
+    inspect_project_3mf,
+    inspect_stl,
+    verify_project_command,
+)
+
+
+def write_binary_stl(path: Path):
+    triangles = [
+        ((0, 0, 0), (10, 0, 0), (0, 20, 30)),
+        ((10, 0, 0), (10, 20, 30), (0, 20, 30)),
+    ]
+    with path.open("wb") as handle:
+        handle.write(b"workpiece test".ljust(80, b"\0"))
+        handle.write(struct.pack("<I", len(triangles)))
+        for a, b, c in triangles:
+            handle.write(struct.pack("<12fH", 0, 0, 1, *a, *b, *c, 0))
+
+
+def test_inspect_stl_and_machine_fit(tmp_path: Path):
+    source = tmp_path / "part.stl"
+    write_binary_stl(source)
+    inspected = inspect_stl(source)
+    assert inspected["encoding"] == "binary"
+    assert inspected["triangle_count"] == 2
+    assert inspected["dimensions_mm"] == [10.0, 20.0, 30.0]
+    assert fits_axis_permutation(inspected["dimensions_mm"], (235, 235, 235))
+    assert not fits_axis_permutation([236, 20, 20], (235, 235, 235))
+    assert fits_axis_permutation([236, 20, 20], (300, 300, 300))
+
+
+def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Path):
+    export = build_project_command(
+        orca_bin=Path("/opt/orca/AppRun"),
+        machine_profile=tmp_path / "machine.json",
+        process_profile=tmp_path / "process.json",
+        filament_profile=tmp_path / "filament.json",
+        source=tmp_path / "source.stl",
+        project_path=tmp_path / "workpiece-production.3mf",
+        quantity=6,
+    )
+    assert "--export-3mf" in export
+    assert "--slice" not in export
+    assert export[export.index("--repetitions") + 1] == "6"
+    assert "--orient" in export
+    assert "--arrange" in export
+
+    verify = verify_project_command(
+        orca_bin=Path("/opt/orca/AppRun"),
+        project_path=tmp_path / "workpiece-production.3mf",
+        output_dir=tmp_path / "verify",
+    )
+    assert "--slice" in verify
+    assert "--export-3mf" not in verify
+    assert "--load-settings" not in verify
+    assert "--load-filaments" not in verify
+
+
+def test_inspect_project_counts_instances_and_embedded_settings(tmp_path: Path):
+    project = tmp_path / "project.3mf"
+    model = """<?xml version="1.0" encoding="UTF-8"?>
+    <model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+      <resources><object id="1" type="model"><mesh /></object></resources>
+      <build>
+        <item objectid="1" />
+        <item objectid="1" />
+        <item objectid="1" />
+      </build>
+    </model>"""
+    with zipfile.ZipFile(project, "w") as archive:
+        archive.writestr("3D/3dmodel.model", model)
+        archive.writestr("Metadata/project_settings.config", "{}")
+        archive.writestr("Metadata/model_settings.config", "<config/>")
+        archive.writestr("Metadata/machine_settings_1.json", "{}")
+        archive.writestr("Metadata/process_settings_1.json", "{}")
+        archive.writestr("Metadata/filament_settings_1.json", "{}")
+    inspected = inspect_project_3mf(project)
+    assert inspected["instance_count"] == 3
+    assert inspected["embedded"]["project_settings"]
+    assert inspected["embedded"]["model_settings"]
+
+
+def test_automatic_project_supports_convert_manual_tree_support(tmp_path: Path):
+    base = tmp_path / "base.json"
+    destination = tmp_path / "effective.json"
+    base.write_text(
+        json.dumps(
+            {
+                "type": "process",
+                "name": "Base",
+                "layer_height": "0.2",
+                "wall_loops": "2",
+                "support_type": "tree(manual)",
+                "support_on_build_plate_only": "1",
+            }
+        )
+    )
+    result = build_process_profile(
+        base,
+        "balanced",
+        "functional",
+        destination,
+        material_label="PLA",
+        automatic_supports=True,
+    )
+    assert result["enable_support"] == "1"
+    assert result["support_type"] == "tree(auto)"
+    assert result["support_on_build_plate_only"] == "0"
