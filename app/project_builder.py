@@ -181,6 +181,144 @@ def patch_project_settings(path: Path, updates: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def repair_project_plate_layout(
+    path: Path,
+    *,
+    source_dimensions_mm: list[float],
+    envelope_mm: tuple[float, float, float],
+    margin_mm: float = 5.0,
+    gap_mm: float = 8.0,
+) -> dict:
+    """Repair Orca 2.4.2 CLI plate placement while preserving its orientation matrices."""
+    if len(source_dimensions_mm) != 3 or any(float(value) <= 0 for value in source_dimensions_mm):
+        raise ValueError("Source dimensions are invalid for project layout repair.")
+    if not zipfile.is_zipfile(path):
+        raise ValueError("Cannot repair layout in a non-3MF archive.")
+
+    with zipfile.ZipFile(path, "r") as archive:
+        infos = archive.infolist()
+        payloads = {info.filename: archive.read(info.filename) for info in infos}
+    model_name = "3D/3dmodel.model"
+    settings_name = "Metadata/model_settings.config"
+    if model_name not in payloads or settings_name not in payloads:
+        raise ValueError("The project 3MF is missing model or plate settings.")
+
+    core_ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    production_ns = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    bambu_ns = "http://schemas.bambulab.com/package/2021"
+    ElementTree.register_namespace("", core_ns)
+    ElementTree.register_namespace("p", production_ns)
+    ElementTree.register_namespace("BambuStudio", bambu_ns)
+
+    try:
+        model_root = ElementTree.fromstring(payloads[model_name])
+        settings_root = ElementTree.fromstring(payloads[settings_name])
+    except ElementTree.ParseError as exc:
+        raise ValueError("The project 3MF contains invalid layout XML.") from exc
+
+    build_items = [node for node in model_root.iter() if node.tag.rsplit("}", 1)[-1] == "item"]
+    if not build_items:
+        raise ValueError("The project 3MF has no build items to arrange.")
+
+    dx, dy, dz = (float(value) for value in source_dimensions_mm)
+    bed_x, bed_y, bed_z = (float(value) for value in envelope_mm)
+    usable_x = bed_x - 2 * margin_mm
+    usable_y = bed_y - 2 * margin_mm
+    if usable_x <= 0 or usable_y <= 0:
+        raise ValueError("Printer envelope is too small for layout margins.")
+
+    placements = []
+    plate_index = 0
+    cursor_x = margin_mm
+    cursor_y = margin_mm
+    row_height = 0.0
+    for item_index, item in enumerate(build_items):
+        raw = (item.attrib.get("transform") or "1 0 0 0 1 0 0 0 1 0 0 0").split()
+        if len(raw) != 12:
+            raise ValueError("The project 3MF contains an invalid instance transform.")
+        try:
+            values = [float(value) for value in raw]
+        except ValueError as exc:
+            raise ValueError("The project 3MF contains a non-numeric instance transform.") from exc
+        width = abs(values[0]) * dx + abs(values[3]) * dy + abs(values[6]) * dz
+        depth = abs(values[1]) * dx + abs(values[4]) * dy + abs(values[7]) * dz
+        height = abs(values[2]) * dx + abs(values[5]) * dy + abs(values[8]) * dz
+        if width > usable_x + 1e-6 or depth > usable_y + 1e-6 or height > bed_z + 1e-6:
+            raise ValueError("Orca's selected orientation does not fit the selected printer envelope.")
+
+        if cursor_x > margin_mm and cursor_x + width > bed_x - margin_mm + 1e-6:
+            cursor_x = margin_mm
+            cursor_y += row_height + gap_mm
+            row_height = 0.0
+        if cursor_y + depth > bed_y - margin_mm + 1e-6:
+            plate_index += 1
+            cursor_x = margin_mm
+            cursor_y = margin_mm
+            row_height = 0.0
+
+        tx = cursor_x + width / 2.0
+        ty = cursor_y + depth / 2.0
+        tz = height / 2.0
+        values[9:12] = [tx, ty, tz]
+        item.set("transform", " ".join(f"{value:.8g}" for value in values))
+        placements.append(
+            {
+                "object_id": item.attrib.get("objectid"),
+                "plate_index": plate_index + 1,
+                "center_mm": [round(tx, 6), round(ty, 6), round(tz, 6)],
+                "footprint_mm": [round(width, 6), round(depth, 6), round(height, 6)],
+            }
+        )
+        cursor_x += width + gap_mm
+        row_height = max(row_height, depth)
+
+    # Replace Orca's broken plate-membership section with deterministic plate
+    # membership matching the repaired build transforms.
+    for child in list(settings_root):
+        if child.tag.rsplit("}", 1)[-1] == "plate":
+            settings_root.remove(child)
+    assemble_index = next(
+        (index for index, child in enumerate(list(settings_root)) if child.tag.rsplit("}", 1)[-1] == "assemble"),
+        len(settings_root),
+    )
+    plates = []
+    for current_plate in range(1, plate_index + 2):
+        plate = ElementTree.Element("plate")
+        for key, value in (
+            ("plater_id", str(current_plate)),
+            ("plater_name", ""),
+            ("locked", "false"),
+            ("filament_map_mode", "Auto For Flush"),
+            ("gcode_file", ""),
+        ):
+            ElementTree.SubElement(plate, "metadata", {"key": key, "value": value})
+        members = [placement for placement in placements if placement["plate_index"] == current_plate]
+        for member_index, placement in enumerate(members, start=1):
+            instance = ElementTree.SubElement(plate, "model_instance")
+            for key, value in (
+                ("object_id", str(placement["object_id"])),
+                ("instance_id", "0"),
+                ("identify_id", str(current_plate * 10000 + member_index)),
+            ):
+                ElementTree.SubElement(instance, "metadata", {"key": key, "value": value})
+        settings_root.insert(assemble_index + current_plate - 1, plate)
+        plates.append({"index": current_plate, "instance_count": len(members)})
+
+    payloads[model_name] = ElementTree.tostring(model_root, encoding="utf-8", xml_declaration=True)
+    payloads[settings_name] = ElementTree.tostring(settings_root, encoding="utf-8", xml_declaration=True)
+
+    temporary = path.with_name(path.name + ".layout")
+    try:
+        with zipfile.ZipFile(temporary, "w") as target:
+            for info in infos:
+                target.writestr(info, payloads[info.filename])
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    return {"repaired": True, "plate_count": len(plates), "plates": plates, "placements": placements}
+
+
 def build_project_command(
     *,
     orca_bin: Path,
