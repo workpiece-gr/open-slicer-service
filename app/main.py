@@ -411,12 +411,9 @@ def build_ender_generic_filament(material: str, destination: Path) -> dict:
 def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
     if printer == "ratrig_vcore3_300":
         material_profile = MATERIALS[material]
-        machine_path = job / "ratrig-project-machine.json"
-        build_ratrig_project_machine(machine_path)
-        process_base = job / "ratrig-project-process-base.json"
-        build_ratrig_project_process_base(material_profile["process"], process_base)
-        filament_path = job / "ratrig-project-filament.json"
-        build_ratrig_project_filament(material_profile["filament"], filament_path)
+        machine_path = PROFILE_FILES["machine"]
+        process_base = material_profile["process"]
+        filament_path = material_profile["filament"]
     elif printer == "ender3_generic_235":
         if material not in ENDER_GENERIC_FILAMENTS:
             raise HTTPException(status_code=422, detail=f"The temporary Ender 3 profile does not yet support {material.upper()}.")
@@ -702,6 +699,15 @@ async def build_project(
             project_path = candidates[0]
 
         layout_repair = None
+        if selected_printer == "ratrig_vcore3_300":
+            try:
+                layout_repair = repair_project_plate_layout(
+                    project_path,
+                    source_dimensions_mm=inspection["dimensions_mm"],
+                    envelope_mm=PROJECT_PRINTERS[selected_printer]["envelope_mm"],
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         project_bytes = project_path.stat().st_size
         if project_bytes <= 0 or project_bytes > MAX_PROJECT_BYTES:
