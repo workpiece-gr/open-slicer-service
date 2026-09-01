@@ -553,6 +553,7 @@ async def build_project(
             # editable 3MF export. Preserve the input orientation for RatRig
             # until the authoritative Workpiece orientation stage is wired in.
             auto_orient=selected_printer != "ratrig_vcore3_300",
+            allow_arrange_rotations=selected_printer != "ratrig_vcore3_300",
         )
         run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
         if not project_path.is_file():
