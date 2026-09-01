@@ -23,6 +23,7 @@ from .project_builder import (
     fits_axis_permutation,
     inspect_project_3mf,
     inspect_stl,
+    patch_project_settings,
     sha256_file,
     verify_project_command,
 )
@@ -271,7 +272,12 @@ def build_ratrig_project_machine(destination: Path) -> dict:
             "instantiation": "true",
             "inherits": "RatRig V-Core 3 300 0.4 nozzle",
             "printer_settings_id": "Workpiece RatRig V-Core 3 300 project",
-            "printer_structure": "corexy",
+            # OrcaSlicer 2.4.2's CLI arranger only assigns the imported
+            # RatRig objects to a plate reliably when the arrangement pass
+            # uses the i3 alignment path. This field is changed back to the
+            # physically correct CoreXY value inside the exported 3MF before
+            # fresh-process verification.
+            "printer_structure": "i3",
             "printable_area": ["0x0", "300x0", "300x300", "0x300"],
             "printable_height": "300",
         }
@@ -591,6 +597,12 @@ async def build_project(
             if not candidates:
                 raise HTTPException(status_code=422, detail="OrcaSlicer completed without exporting an editable project 3MF.")
             project_path = candidates[0]
+
+        if selected_printer == "ratrig_vcore3_300":
+            try:
+                patch_project_settings(project_path, {"printer_structure": "corexy"})
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         project_bytes = project_path.stat().st_size
         if project_bytes <= 0 or project_bytes > MAX_PROJECT_BYTES:
