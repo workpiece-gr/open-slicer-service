@@ -123,7 +123,7 @@ PROJECT_PRINTERS = {
 
 app = FastAPI(
     title="Open Slicer Service",
-    version="0.3.0",
+    version="0.4.0",
     license_info={"name": "GNU AGPL-3.0-or-later", "url": "https://www.gnu.org/licenses/agpl-3.0.html"},
 )
 
@@ -552,7 +552,7 @@ def find_output(directory: Path) -> Path:
     return candidates[0]
 
 
-@app.post("/v1/project")
+@app.post("/v1/project", response_model=None)
 async def build_project(
     _project_access: Annotated[None, Depends(project_access)],
     file: Annotated[UploadFile, File(description="Single-colour STL")],
