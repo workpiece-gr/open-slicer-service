@@ -238,10 +238,17 @@ def build_ender_generic_machine(destination: Path) -> dict:
         raise RuntimeError("The bundled Ender 3 profile must have type=machine")
     # Temporary Workpiece envelope requested for the two Ender 3-class machines.
     # Replace this override with the real printer profiles before production authority.
+    # Make this a real user preset that inherits the official Orca Ender-3
+    # system preset. Orca's CLI compares a user machine's inherits value to the
+    # process compatible_printers list; inheriting fdm_creality_common directly
+    # incorrectly makes the stock Ender process look incompatible.
     profile.update(
         {
+            "name": "Workpiece Ender 3 235 temporary",
             "from": "user",
+            "inherits": "Creality Ender-3 0.4 nozzle",
             "instantiation": "true",
+            "printer_settings_id": "Workpiece Ender 3 235 temporary",
             "printable_area": ["0x0", "235x0", "235x235", "0x235"],
             "printable_height": "235",
             "printer_notes": "Workpiece temporary generic Ender 3 profile; replace with measured production profile.",
