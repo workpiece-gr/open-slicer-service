@@ -96,6 +96,9 @@ def test_inspect_project_counts_instances_and_embedded_settings(tmp_path: Path):
         archive.writestr("Metadata/filament_settings_1.json", "{}")
     inspected = inspect_project_3mf(project)
     assert inspected["instance_count"] == 3
+    assert len(inspected["build_items"]) == 3
+    assert inspected["build_items"][0]["object_id"] == "1"
+    assert inspected["plates"] == []
     assert inspected["embedded"]["project_settings"]
     assert inspected["embedded"]["model_settings"]
 
