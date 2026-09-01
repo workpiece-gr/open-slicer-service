@@ -139,8 +139,30 @@ def inspect_project_3mf(path: Path) -> dict:
                         "model_instances": instances,
                     }
                 )
+        project_settings_summary = {}
+        project_settings_name = "Metadata/project_settings.config"
+        if project_settings_name in names:
+            try:
+                project_settings = json.loads(archive.read(project_settings_name).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("The exported 3MF contains invalid project settings JSON.") from exc
+            for key in (
+                "printable_area",
+                "printable_height",
+                "printer_settings_id",
+                "printer_model",
+                "printer_structure",
+                "nozzle_diameter",
+                "extruder_printable_area",
+                "extruder_printable_height",
+                "bed_exclude_area",
+                "print_sequence",
+                "enable_prime_tower",
+            ):
+                if key in project_settings:
+                    project_settings_summary[key] = project_settings[key]
         embedded = {
-            "project_settings": "Metadata/project_settings.config" in names,
+            "project_settings": project_settings_name in names,
             "model_settings": model_settings_name in names,
             "machine_presets": sorted(name for name in names if name.startswith("Metadata/machine_settings_")),
             "process_presets": sorted(name for name in names if name.startswith("Metadata/process_settings_")),
@@ -151,6 +173,7 @@ def inspect_project_3mf(path: Path) -> dict:
             "build_items": build_items,
             "plates": plates,
             "embedded": embedded,
+            "project_settings_summary": project_settings_summary,
             "entries": len(names),
         }
 
