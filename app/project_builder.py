@@ -163,6 +163,7 @@ def build_project_command(
     sources: list[Path],
     project_path: Path,
     auto_orient: bool = True,
+    allow_arrange_rotations: bool = True,
 ) -> list[str]:
     if not sources:
         raise ValueError("At least one STL source is required.")
@@ -173,6 +174,7 @@ def build_project_command(
     command = [
         "xvfb-run", "-a", str(orca_bin),
         "--arrange", "1",
+        "--allow-rotations", "1" if allow_arrange_rotations else "0",
         *(["--orient", "1"] if auto_orient else ["--orient", "0"]),
         "--ensure-on-bed",
         "--allow-newer-file",
