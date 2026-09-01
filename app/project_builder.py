@@ -357,6 +357,28 @@ def repair_project_plate_layout(
         cursor_x += width + gap_mm
         row_height = max(row_height, depth)
 
+    # Orca represents multiple logical plates in one 3MF by placing them on a
+    # virtual grid with a 20% gap. Plate membership metadata alone is not
+    # enough: each build item's transform must also include that plate's
+    # virtual origin, otherwise a fresh Orca process reports the later plate
+    # as empty/outside.
+    plate_count = plate_index + 1
+    plate_cols = int(math.ceil(math.sqrt(plate_count)))
+    stride_x = bed_x * 1.2
+    stride_y = bed_y * 1.2
+    for item, placement in zip(build_items, placements):
+        virtual_index = placement["plate_index"] - 1
+        virtual_col = virtual_index % plate_cols
+        virtual_row = virtual_index // plate_cols
+        origin_x = virtual_col * stride_x
+        origin_y = -virtual_row * stride_y
+        values = parse_transform(item.attrib.get("transform"))
+        values[9] += origin_x
+        values[10] += origin_y
+        item.set("transform", " ".join(f"{value:.8g}" for value in values))
+        placement["virtual_plate_origin_mm"] = [round(origin_x, 6), round(origin_y, 6), 0.0]
+        placement["translation_mm"] = [round(values[9], 6), round(values[10], 6), round(values[11], 6)]
+
     # Replace Orca's broken plate-membership section with deterministic plate
     # membership matching the repaired build transforms.
     for child in list(settings_root):
