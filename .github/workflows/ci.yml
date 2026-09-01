@@ -87,6 +87,7 @@ jobs:
 
           write_box("/tmp/workpiece-cube.stl", 20, 20, 20)
           write_box("/tmp/workpiece-multiplate.stl", 80, 80, 20)
+          write_box("/tmp/workpiece-ratrig-only.stl", 250, 20, 20)
           PY
 
       - name: Build and reopen editable project 3MF
@@ -130,12 +131,57 @@ jobs:
           with zipfile.ZipFile(BytesIO(project)) as archive:
               assert "3D/3dmodel.model" in archive.namelist()
               assert "Metadata/project_settings.config" in archive.namelist()
+          project_bytes = base64.b64decode(payload["project"]["base64"], validate=True)
+          open("/tmp/workpiece-ender-project.3mf", "wb").write(project_bytes)
           print(json.dumps({
               "printer": payload["printer"],
               "project_sha256": payload["project"]["sha256"],
               "instances": payload["project"]["inspection"]["instance_count"],
               "plates": payload["verification"]["plate_count"],
               "filament_g": payload["verification"]["total_filament_grams"],
+          }, indent=2))
+          PY
+
+      - name: Verify RatRig envelope and PCTG fallback
+        run: |
+          set -e
+          curl --fail-with-body --max-time 300 \
+            -F file=@/tmp/workpiece-ratrig-only.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=2 \
+            -F printer=auto \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/ratrig-project.json
+          curl --fail-with-body --max-time 300 \
+            -F file=@/tmp/workpiece-cube.stl \
+            -F material=pctg \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=1 \
+            -F printer=auto \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/pctg-project.json
+          python - <<'PY'
+          import base64
+          import json
+
+          ratrig = json.load(open("/tmp/ratrig-project.json", encoding="utf-8"))
+          pctg = json.load(open("/tmp/pctg-project.json", encoding="utf-8"))
+          assert ratrig["printer"]["key"] == "ratrig_vcore3_300"
+          assert ratrig["printer"]["temporary_generic"] is False
+          assert ratrig["project"]["inspection"]["instance_count"] == 2
+          assert ratrig["verification"]["reopened_in_fresh_orca_process"] is True
+          assert ratrig["verification"]["total_filament_grams"] > 0
+          assert pctg["printer"]["key"] == "ratrig_vcore3_300"
+          assert pctg["request"]["material"] == "pctg"
+          assert pctg["verification"]["reopened_in_fresh_orca_process"] is True
+          open("/tmp/workpiece-ratrig-project.3mf", "wb").write(base64.b64decode(ratrig["project"]["base64"], validate=True))
+          print(json.dumps({
+              "large_part_printer": ratrig["printer"]["key"],
+              "pctg_printer": pctg["printer"]["key"],
+              "large_part_instances": ratrig["project"]["inspection"]["instance_count"],
           }, indent=2))
           PY
 
@@ -169,12 +215,25 @@ jobs:
           assert payload["verification"]["plate_count"] > 1
           assert len(payload["verification"]["plates"]) == payload["verification"]["plate_count"]
           assert payload["verification"]["total_filament_grams"] > 0
+          import base64
+          open("/tmp/workpiece-multiplate-project.3mf", "wb").write(base64.b64decode(payload["project"]["base64"], validate=True))
           print(json.dumps({
               "instances": payload["project"]["inspection"]["instance_count"],
               "plates": payload["verification"]["plate_count"],
               "filament_g": payload["verification"]["total_filament_grams"],
           }, indent=2))
           PY
+
+      - name: Upload generated project 3MF fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp2b-orca-project-3mf
+          path: |
+            /tmp/workpiece-ender-project.3mf
+            /tmp/workpiece-ratrig-project.3mf
+            /tmp/workpiece-multiplate-project.3mf
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Show service logs on failure
         if: failure()
