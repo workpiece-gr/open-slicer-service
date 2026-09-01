@@ -247,3 +247,40 @@ def test_repair_project_plate_layout_centers_instances_and_builds_plate_membersh
     assert bounds[0][0][1] >= 0
     assert bounds[1][1][0] <= 300
     assert bounds[1][1][1] <= 300
+
+
+def test_repair_project_plate_layout_uses_orca_virtual_plate_grid(tmp_path: Path):
+    project = tmp_path / "virtual-plates.3mf"
+    model = """<?xml version="1.0" encoding="UTF-8"?>
+    <model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+      <resources>
+        <object id="2" type="model"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="250" y="0" z="0"/>
+          <vertex x="250" y="250" z="20"/><vertex x="0" y="250" z="20"/>
+        </vertices></mesh></object>
+        <object id="4" type="model"><mesh><vertices>
+          <vertex x="0" y="0" z="0"/><vertex x="250" y="0" z="0"/>
+          <vertex x="250" y="250" z="20"/><vertex x="0" y="250" z="20"/>
+        </vertices></mesh></object>
+      </resources>
+      <build>
+        <item objectid="2" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
+        <item objectid="4" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>
+      </build>
+    </model>"""
+    settings = """<?xml version="1.0" encoding="UTF-8"?><config><plate/><assemble/></config>"""
+    with zipfile.ZipFile(project, "w") as archive:
+        archive.writestr("3D/3dmodel.model", model)
+        archive.writestr("Metadata/model_settings.config", settings)
+        archive.writestr("Metadata/project_settings.config", "{}")
+    result = repair_project_plate_layout(
+        project,
+        source_dimensions_mm=[250, 250, 20],
+        envelope_mm=(300, 300, 300),
+    )
+    assert result["plate_count"] == 2
+    assert result["placements"][0]["virtual_plate_origin_mm"] == [0.0, 0.0, 0.0]
+    assert result["placements"][1]["virtual_plate_origin_mm"] == [360.0, 0.0, 0.0]
+    inspected = inspect_project_3mf(project)
+    second_transform = [float(value) for value in inspected["build_items"][1]["transform"].split()]
+    assert second_transform[9] >= 360.0
