@@ -156,6 +156,15 @@ jobs:
             -o /tmp/ratrig-project.json
           curl --fail-with-body --max-time 300 \
             -F file=@/tmp/workpiece-cube.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=1 \
+            -F printer=ratrig_vcore3_300 \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/ratrig-small-pla-project.json
+          curl --fail-with-body --max-time 300 \
+            -F file=@/tmp/workpiece-cube.stl \
             -F material=pctg \
             -F quality=balanced \
             -F strength=functional \
@@ -168,8 +177,13 @@ jobs:
           import json
 
           ratrig = json.load(open("/tmp/ratrig-project.json", encoding="utf-8"))
+          ratrig_small = json.load(open("/tmp/ratrig-small-pla-project.json", encoding="utf-8"))
           pctg = json.load(open("/tmp/pctg-project.json", encoding="utf-8"))
           assert ratrig["printer"]["key"] == "ratrig_vcore3_300"
+          assert ratrig_small["printer"]["key"] == "ratrig_vcore3_300"
+          assert ratrig_small["project"]["inspection"]["instance_count"] == 1
+          assert ratrig_small["verification"]["reopened_in_fresh_orca_process"] is True
+          assert ratrig_small["verification"]["total_filament_grams"] > 0
           assert ratrig["printer"]["temporary_generic"] is False
           assert ratrig["project"]["inspection"]["instance_count"] == 2
           assert ratrig["verification"]["reopened_in_fresh_orca_process"] is True
