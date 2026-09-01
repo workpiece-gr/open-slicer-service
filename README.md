@@ -59,6 +59,44 @@ Supported material keys are `pla`, `petg`, `pctg`, `abs`, and `tpu`.
 | Functional | 3 walls |
 | Load bearing | 5 walls |
 
+## Experimental editable project 3MF (CP2b)
+
+The `/v1/project` endpoint is an **unmerged experimental manufacturing-project builder**. It is intentionally separate from the existing `/v1/slice` quote-preview path.
+
+It accepts one original STL plus quantity/material/quality/strength and:
+
+1. inspects the original STL envelope,
+2. chooses the smallest currently eligible Workpiece FDM machine when `printer=auto`,
+3. asks OrcaSlicer to auto-orient, duplicate and auto-arrange the requested quantity,
+4. enables automatic supports in the effective process profile,
+5. exports an editable project `.3mf` **without slicing in the same Orca invocation**,
+6. opens that project in a fresh Orca process with no external profiles loaded,
+7. slices all plates to prove that the project carries enough embedded configuration to reopen and slice,
+8. returns the editable 3MF plus verification metadata.
+
+The temporary machine matrix is:
+
+- `ender3_generic_235` — 235 × 235 × 235 mm Workpiece routing envelope, using OrcaSlicer 2.4.2's bundled generic Creality Ender-3 0.4 mm machine/process/filament presets with only the Workpiece envelope overridden. This is **not a calibrated production profile** and must be replaced when the real Ender profiles are supplied.
+- `ratrig_vcore3_300` — existing Workpiece RatRig V-Core 3 300 / 0.4 mm profiles.
+
+Ender auto-routing currently supports PLA, PETG, ABS and TPU from Orca's bundled generic Creality filaments. PCTG stays on the RatRig path until a suitable Ender profile is supplied.
+
+Example:
+
+```bash
+curl -F file=@part.stl \
+  -F material=pla \
+  -F quality=balanced \
+  -F strength=functional \
+  -F quantity=6 \
+  -F printer=auto \
+  http://localhost:8080/v1/project
+```
+
+The JSON response includes the project as base64 only for this experiment. A later production checkpoint should replace that transport with Workpiece-owned object storage/binary artifact handoff.
+
+**Do not make this endpoint production-authoritative until real Orca 2.4.2 Docker acceptance confirms multi-instance/multi-plate arrangement, project reopen, support behavior and desktop Orca compatibility.**
+
 ## Publish to GitHub
 
 1. Sign in to GitHub and open <https://github.com/new>.
@@ -88,6 +126,7 @@ MAX_PREVIEW_MOVES=30000
 - `GET /health` — engine, licence/source and profile readiness
 - `GET /source` — redirects to the deployed public source repository
 - `POST /v1/slice` — multipart STL plus `material`, `quality` and `strength`; returns slicer summary and sampled extrusion moves
+- `POST /v1/project` — experimental editable Orca project 3MF builder with quantity, auto machine routing, auto orientation/arrangement/supports and fresh-Orca reopen verification
 
 The API never sends a job to a printer. Uploaded models live only in a per-request temporary directory and are deleted after the response. Add an edge rate limit before opening the endpoint to anonymous production traffic.
 
