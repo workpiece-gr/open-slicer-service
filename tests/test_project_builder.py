@@ -153,10 +153,12 @@ def test_automatic_project_supports_convert_manual_tree_support(tmp_path: Path):
         material_label="PLA",
         automatic_supports=True,
         project_reopen_safe=True,
+        single_colour_project=True,
     )
     assert result["enable_support"] == "1"
     assert result["support_type"] == "tree(auto)"
     assert result["support_on_build_plate_only"] == "0"
+    assert result["enable_prime_tower"] == "0"
     assert "G92 E0" in result["layer_change_gcode"]
 
 
