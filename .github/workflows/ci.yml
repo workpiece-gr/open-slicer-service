@@ -61,28 +61,32 @@ jobs:
           docker logs workpiece-slicer
           exit 1
 
-      - name: Generate integration STL
+      - name: Generate integration STL fixtures
         run: |
           python - <<'PY'
           import struct
           from pathlib import Path
 
-          vertices = [
-              (0,0,0),(20,0,0),(20,20,0),(0,20,0),
-              (0,0,20),(20,0,20),(20,20,20),(0,20,20),
-          ]
           faces = [
               (0,2,1),(0,3,2),(4,5,6),(4,6,7),
               (0,1,5),(0,5,4),(1,2,6),(1,6,5),
               (2,3,7),(2,7,6),(3,0,4),(3,4,7),
           ]
-          path = Path("/tmp/workpiece-cube.stl")
-          with path.open("wb") as handle:
-              handle.write(b"Workpiece CP2b Docker fixture".ljust(80, b"\0"))
-              handle.write(struct.pack("<I", len(faces)))
-              for face in faces:
-                  points = [vertices[index] for index in face]
-                  handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
+
+          def write_box(path, x, y, z):
+              vertices = [
+                  (0,0,0),(x,0,0),(x,y,0),(0,y,0),
+                  (0,0,z),(x,0,z),(x,y,z),(0,y,z),
+              ]
+              with Path(path).open("wb") as handle:
+                  handle.write(b"Workpiece CP2b Docker fixture".ljust(80, b"\0"))
+                  handle.write(struct.pack("<I", len(faces)))
+                  for face in faces:
+                      points = [vertices[index] for index in face]
+                      handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
+
+          write_box("/tmp/workpiece-cube.stl", 20, 20, 20)
+          write_box("/tmp/workpiece-multiplate.stl", 80, 80, 20)
           PY
 
       - name: Build and reopen editable project 3MF
@@ -129,6 +133,43 @@ jobs:
           print(json.dumps({
               "printer": payload["printer"],
               "project_sha256": payload["project"]["sha256"],
+              "instances": payload["project"]["inspection"]["instance_count"],
+              "plates": payload["verification"]["plate_count"],
+              "filament_g": payload["verification"]["total_filament_grams"],
+          }, indent=2))
+          PY
+
+      - name: Force and verify multi-plate arrangement
+        run: |
+          set +e
+          curl --fail-with-body --max-time 300 \
+            -F file=@/tmp/workpiece-multiplate.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=12 \
+            -F printer=auto \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/multiplate-project.json
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            cat /tmp/multiplate-project.json || true
+            docker logs workpiece-slicer
+            exit "$status"
+          fi
+          python - <<'PY'
+          import json
+
+          payload = json.load(open("/tmp/multiplate-project.json", encoding="utf-8"))
+          assert payload["printer"]["key"] == "ender3_generic_235"
+          assert payload["request"]["quantity"] == 12
+          assert payload["project"]["inspection"]["instance_count"] == 12
+          assert payload["verification"]["reopened_in_fresh_orca_process"] is True
+          assert payload["verification"]["plate_count"] > 1
+          assert len(payload["verification"]["plates"]) == payload["verification"]["plate_count"]
+          assert payload["verification"]["total_filament_grams"] > 0
+          print(json.dumps({
               "instances": payload["project"]["inspection"]["instance_count"],
               "plates": payload["verification"]["plate_count"],
               "filament_g": payload["verification"]["total_filament_grams"],
