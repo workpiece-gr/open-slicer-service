@@ -234,6 +234,8 @@ def test_repair_project_plate_layout_centers_instances_and_builds_plate_membersh
     inspected = inspect_project_3mf(project)
     assert inspected["instance_count"] == 2
     assert inspected["plates"][0]["model_instance_count"] == 2
-    centers = [item["center_mm"] for item in result["placements"]]
-    assert centers[0][1] > 0
-    assert centers[1][1] > 0
+    bounds = [item["placed_bounds_mm"] for item in result["placements"]]
+    assert bounds[0][0][0] >= 0
+    assert bounds[0][0][1] >= 0
+    assert bounds[1][1][0] <= 300
+    assert bounds[1][1][1] <= 300
