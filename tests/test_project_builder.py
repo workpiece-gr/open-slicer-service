@@ -43,13 +43,13 @@ def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Pa
         machine_profile=tmp_path / "machine.json",
         process_profile=tmp_path / "process.json",
         filament_profile=tmp_path / "filament.json",
-        source=tmp_path / "source.stl",
+        sources=[tmp_path / f"source-{index}.stl" for index in range(6)],
         project_path=tmp_path / "workpiece-production.3mf",
-        quantity=6,
     )
     assert "--export-3mf" in export
     assert "--slice" not in export
-    assert export[export.index("--repetitions") + 1] == "6"
+    assert "--repetitions" not in export
+    assert sum(str(value).endswith(".stl") for value in export) == 6
     assert "--orient" in export
     assert "--arrange" in export
 
