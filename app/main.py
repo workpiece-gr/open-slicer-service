@@ -547,6 +547,17 @@ async def build_project(
         for index, gcode in enumerate(gcode_files, start=1):
             summary = parse_gcode_summary(gcode)
             if not summary["print_time_seconds"] or not summary["filament_grams"] or not summary["layer_count"]:
+                if os.getenv("ORCA_DEBUG_LOGS") == "1":
+                    interesting = []
+                    with gcode.open("r", encoding="utf-8", errors="ignore") as handle:
+                        for line in handle:
+                            lower = line.lower()
+                            if any(token in lower for token in ("filament", "printing time", "estimated time", "layer")):
+                                interesting.append(line.rstrip())
+                                if len(interesting) >= 80:
+                                    break
+                    print("ORCA DEBUG incomplete summary:", summary, flush=True)
+                    print("ORCA DEBUG summary lines:\n" + "\n".join(interesting), flush=True)
                 raise HTTPException(status_code=422, detail="Fresh-project verification produced incomplete slice statistics.")
             total_time += int(summary["print_time_seconds"])
             total_filament += float(summary["filament_grams"])
