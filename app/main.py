@@ -200,6 +200,7 @@ def build_process_profile(
     material_label: str = "",
     automatic_supports: bool = False,
     project_reopen_safe: bool = False,
+    single_colour_project: bool = False,
 ) -> dict:
     try:
         profile = json.loads(base_path.read_text(encoding="utf-8"))
@@ -229,6 +230,11 @@ def build_process_profile(
                 "support_on_build_plate_only": "0",
             }
         )
+    if single_colour_project:
+        # Workpiece CP2b currently accepts a single-colour STL/material job.
+        # A prime/wipe tower has no purpose here and can push generated G-code
+        # outside the printable area on a 300 mm RatRig bed.
+        profile["enable_prime_tower"] = "0"
     if project_reopen_safe:
         # OrcaSlicer 2.4.2 validates reopened project 3MFs more strictly than
         # the initial export. With relative extrusion on Marlin it requires an
@@ -371,6 +377,7 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
         str(material_label),
         automatic_supports=True,
         project_reopen_safe=True,
+        single_colour_project=True,
     )
     return machine_path, process_path, filament_path
 
