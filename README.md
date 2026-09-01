@@ -61,7 +61,7 @@ Supported material keys are `pla`, `petg`, `pctg`, `abs`, and `tpu`.
 
 ## Experimental editable project 3MF (CP2b)
 
-The `/v1/project` endpoint is an **unmerged experimental manufacturing-project builder**. It is intentionally separate from the existing `/v1/slice` quote-preview path.
+The `/v1/project` endpoint is an **experimental manufacturing-project builder**. It is intentionally separate from the existing `/v1/slice` quote-preview path.
 
 It accepts one original STL plus quantity/material/quality/strength and:
 
