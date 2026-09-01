@@ -87,7 +87,7 @@ def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Pa
         auto_orient=False,
         allow_arrange_rotations=False,
     )
-    assert "--no-allow-rotations" in no_rotate
+    assert "--allow-rotations=0" in no_rotate
     assert "--allow-rotations" not in no_rotate
 
     verify = verify_project_command(
