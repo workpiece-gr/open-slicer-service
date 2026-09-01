@@ -52,6 +52,18 @@ def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Pa
     assert sum(str(value).endswith(".stl") for value in export) == 6
     assert "--orient" in export
     assert "--arrange" in export
+    assert "--assemble" not in export
+
+    single = build_project_command(
+        orca_bin=Path("/opt/orca/AppRun"),
+        machine_profile=tmp_path / "machine.json",
+        process_profile=tmp_path / "process.json",
+        filament_profile=tmp_path / "filament.json",
+        sources=[tmp_path / "source-single.stl"],
+        project_path=tmp_path / "workpiece-single.3mf",
+    )
+    assert "--assemble" in single
+    assert sum(str(value).endswith(".stl") for value in single) == 1
 
     verify = verify_project_command(
         orca_bin=Path("/opt/orca/AppRun"),
