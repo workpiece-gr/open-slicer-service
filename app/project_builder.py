@@ -178,32 +178,6 @@ def inspect_project_3mf(path: Path) -> dict:
         }
 
 
-def patch_project_settings(path: Path, updates: dict[str, object]) -> None:
-    """Rewrite only Orca's flattened project settings inside an editable 3MF."""
-    if not zipfile.is_zipfile(path):
-        raise ValueError("Cannot patch settings in a non-3MF archive.")
-    temporary = path.with_name(path.name + ".patched")
-    found = False
-    try:
-        with zipfile.ZipFile(path, "r") as source, zipfile.ZipFile(temporary, "w") as target:
-            for info in source.infolist():
-                payload = source.read(info.filename)
-                if info.filename == "Metadata/project_settings.config":
-                    try:
-                        settings = json.loads(payload.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                        raise ValueError("The project 3MF contains invalid project settings.") from exc
-                    settings.update(updates)
-                    payload = (json.dumps(settings, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-                    found = True
-                target.writestr(info, payload)
-        if not found:
-            raise ValueError("The project 3MF does not contain Metadata/project_settings.config.")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def repair_project_plate_layout(
     path: Path,
     *,
