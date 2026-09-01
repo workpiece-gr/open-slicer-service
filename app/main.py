@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
@@ -562,7 +562,8 @@ async def build_project(
     quantity: Annotated[int, Form()] = 1,
     printer: Annotated[str, Form()] = "auto",
     verify: Annotated[bool, Form()] = True,
-) -> dict:
+    response_mode: Annotated[str, Form()] = "json",
+) -> dict | Response:
     if material not in MATERIALS:
         raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
     if quality not in QUALITY:
@@ -571,6 +572,8 @@ async def build_project(
         raise HTTPException(status_code=422, detail=f"strength must be one of: {', '.join(STRENGTH)}")
     if quantity < 1 or quantity > MAX_PROJECT_QUANTITY:
         raise HTTPException(status_code=422, detail=f"quantity must be between 1 and {MAX_PROJECT_QUANTITY}")
+    if response_mode not in {"json", "binary"}:
+        raise HTTPException(status_code=422, detail="response_mode must be json or binary")
     filename = file.filename or "upload.stl"
     if Path(filename).suffix.lower() != ".stl":
         raise HTTPException(status_code=415, detail="The experimental project builder accepts STL files only.")
@@ -708,7 +711,7 @@ async def build_project(
             }
 
         profile = PROJECT_PRINTERS[selected_printer]
-        return {
+        payload = {
             "experimental": True,
             "engine": {
                 "name": "OrcaSlicer",
@@ -738,6 +741,7 @@ async def build_project(
                 "orientation": "orca_auto",
                 "arrangement": "orca_auto",
                 "verification_requested": verify,
+                "response_mode": response_mode,
             },
             "profiles": {
                 "machine": {
@@ -769,6 +773,50 @@ async def build_project(
                 "Automatic orientation, arrangement and supports require acceptance testing with representative Workpiece models before manufacturing authority.",
             ],
         }
+        if response_mode == "binary":
+            compact_inspection = {
+                "instance_count": project_inspection["instance_count"],
+                "plate_count": len(project_inspection.get("plates") or []),
+                "embedded": project_inspection["embedded"],
+            }
+            compact_metadata = {
+                "schema_version": 1,
+                "engine": payload["engine"],
+                "source": {
+                    "filename": payload["source"]["filename"],
+                    "sha256": payload["source"]["sha256"],
+                    "inspection": payload["source"]["inspection"],
+                },
+                "printer": payload["printer"],
+                "request": payload["request"],
+                "profiles": payload["profiles"],
+                "project": {
+                    "filename": payload["project"]["filename"],
+                    "media_type": payload["project"]["media_type"],
+                    "bytes": payload["project"]["bytes"],
+                    "sha256": payload["project"]["sha256"],
+                    "inspection": compact_inspection,
+                    "layout_repair": {
+                        "applied": layout_repair is not None,
+                        "plate_count": layout_repair.get("plate_count") if layout_repair else None,
+                    },
+                },
+                "verification": payload["verification"],
+                "warnings": payload["warnings"],
+            }
+            encoded_metadata = base64.urlsafe_b64encode(
+                json.dumps(compact_metadata, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+            ).decode("ascii")
+            return Response(
+                content=project_path.read_bytes(),
+                media_type="model/3mf",
+                headers={
+                    "Content-Disposition": 'attachment; filename="workpiece-production.3mf"',
+                    "X-Workpiece-Project-SHA256": payload["project"]["sha256"],
+                    "X-Workpiece-Project-Metadata": encoded_metadata,
+                },
+            )
+        return payload
 
 
 @app.post("/v1/slice")
