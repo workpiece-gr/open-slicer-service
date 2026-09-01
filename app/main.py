@@ -252,6 +252,34 @@ async def save_upload(upload: UploadFile, destination: Path) -> int:
     return size
 
 
+def build_ratrig_project_machine(destination: Path) -> dict:
+    try:
+        profile = json.loads(PROFILE_FILES["machine"].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid Workpiece RatRig machine profile: {exc}") from exc
+    if profile.get("type") != "machine":
+        raise RuntimeError("The Workpiece RatRig profile must have type=machine")
+    # Orca's CLI arranger behaves incorrectly for the imported RatRig preset
+    # while printer_structure is left as "undefine": large parts can be
+    # exported with negative build coordinates and no plate membership.
+    # RatRig V-Core 3 is a CoreXY machine, so make that geometry explicit for
+    # project generation and remove the external inheritance dependency.
+    profile.update(
+        {
+            "name": "Workpiece RatRig V-Core 3 300 project",
+            "from": "user",
+            "instantiation": "true",
+            "printer_settings_id": "Workpiece RatRig V-Core 3 300 project",
+            "printer_structure": "corexy",
+            "printable_area": ["0x0", "300x0", "300x300", "0x300"],
+            "printable_height": "300",
+        }
+    )
+    profile.pop("inherits", None)
+    destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return profile
+
+
 def build_ender_generic_machine(destination: Path) -> dict:
     try:
         profile = json.loads(ENDER_GENERIC_MACHINE.read_text(encoding="utf-8"))
@@ -308,15 +336,8 @@ def build_ender_generic_filament(material: str, destination: Path) -> dict:
 def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
     if printer == "ratrig_vcore3_300":
         material_profile = MATERIALS[material]
-        # Use Orca's pinned system RatRig machine definition for editable
-        # project export. The current Workpiece user-copy machine profile is
-        # valid for direct slicing but OrcaSlicer 2.4.2 exports broken plate
-        # placement from it (duplicate transforms and no plate instances).
-        # Keep the custom process/filament profiles; only the machine shell is
-        # swapped here while CP2b isolates that Orca project-export behavior.
-        if not RATRIG_OFFICIAL_MACHINE.is_file():
-            raise HTTPException(status_code=503, detail="The pinned OrcaSlicer RatRig machine profile is not available.")
-        machine_path = RATRIG_OFFICIAL_MACHINE
+        machine_path = job / "ratrig-project-machine.json"
+        build_ratrig_project_machine(machine_path)
         process_base = material_profile["process"]
         filament_path = material_profile["filament"]
     elif printer == "ender3_generic_235":
