@@ -24,6 +24,7 @@ from .project_builder import (
     inspect_project_3mf,
     inspect_stl,
     patch_project_settings,
+    repair_project_plate_layout,
     sha256_file,
     verify_project_command,
 )
@@ -588,7 +589,7 @@ async def build_project(
             # plate placement for the current RatRig user profile during
             # editable 3MF export. Preserve the input orientation for RatRig
             # until the authoritative Workpiece orientation stage is wired in.
-            auto_orient=selected_printer != "ratrig_vcore3_300",
+            auto_orient=True,
             allow_arrange_rotations=selected_printer != "ratrig_vcore3_300",
         )
         run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
@@ -598,8 +599,14 @@ async def build_project(
                 raise HTTPException(status_code=422, detail="OrcaSlicer completed without exporting an editable project 3MF.")
             project_path = candidates[0]
 
+        layout_repair = None
         if selected_printer == "ratrig_vcore3_300":
             try:
+                layout_repair = repair_project_plate_layout(
+                    project_path,
+                    source_dimensions_mm=inspection["dimensions_mm"],
+                    envelope_mm=PROJECT_PRINTERS[selected_printer]["envelope_mm"],
+                )
                 patch_project_settings(project_path, {"printer_structure": "corexy"})
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -696,6 +703,7 @@ async def build_project(
                 "sha256": sha256_file(project_path),
                 "base64": base64.b64encode(project_path.read_bytes()).decode("ascii"),
                 "inspection": project_inspection,
+                "layout_repair": layout_repair,
             },
             "verification": {
                 "reopened_in_fresh_orca_process": True,
