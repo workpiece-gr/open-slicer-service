@@ -220,12 +220,92 @@ def repair_project_plate_layout(
     if not build_items:
         raise ValueError("The project 3MF has no build items to arrange.")
 
-    dx, dy, dz = (float(value) for value in source_dimensions_mm)
     bed_x, bed_y, bed_z = (float(value) for value in envelope_mm)
     usable_x = bed_x - 2 * margin_mm
     usable_y = bed_y - 2 * margin_mm
     if usable_x <= 0 or usable_y <= 0:
         raise ValueError("Printer envelope is too small for layout margins.")
+
+    def parse_transform(raw_value: str | None) -> list[float]:
+        raw = (raw_value or "1 0 0 0 1 0 0 0 1 0 0 0").split()
+        if len(raw) != 12:
+            raise ValueError("The project 3MF contains an invalid instance transform.")
+        try:
+            return [float(value) for value in raw]
+        except ValueError as exc:
+            raise ValueError("The project 3MF contains a non-numeric instance transform.") from exc
+
+    def transform_point(values: list[float], point: tuple[float, float, float], include_translation: bool = True):
+        x, y, z = point
+        tx, ty, tz = values[9:12] if include_translation else (0.0, 0.0, 0.0)
+        return (
+            x * values[0] + y * values[3] + z * values[6] + tx,
+            x * values[1] + y * values[4] + z * values[7] + ty,
+            x * values[2] + y * values[5] + z * values[8] + tz,
+        )
+
+    main_objects = {
+        node.attrib.get("id"): node
+        for node in model_root.iter()
+        if node.tag.rsplit("}", 1)[-1] == "object" and node.attrib.get("id")
+    }
+
+    def vertices_for_build_object(object_id: str | None):
+        object_node = main_objects.get(object_id)
+        if object_node is None:
+            raise ValueError("The project 3MF references an unknown build object.")
+        components = [node for node in object_node if node.tag.rsplit("}", 1)[-1] == "components"]
+        if components:
+            vertices = []
+            for component in components[0]:
+                if component.tag.rsplit("}", 1)[-1] != "component":
+                    continue
+                path_value = next(
+                    (value for key, value in component.attrib.items() if key.rsplit("}", 1)[-1] == "path"),
+                    None,
+                )
+                component_object_id = component.attrib.get("objectid")
+                if not path_value or not component_object_id:
+                    raise ValueError("The project 3MF contains an incomplete component reference.")
+                archive_name = path_value.lstrip("/")
+                if archive_name not in payloads:
+                    raise ValueError("The project 3MF references a missing component model.")
+                try:
+                    component_root = ElementTree.fromstring(payloads[archive_name])
+                except ElementTree.ParseError as exc:
+                    raise ValueError("The project 3MF contains invalid component geometry XML.") from exc
+                component_object = next(
+                    (
+                        node for node in component_root.iter()
+                        if node.tag.rsplit("}", 1)[-1] == "object" and node.attrib.get("id") == component_object_id
+                    ),
+                    None,
+                )
+                if component_object is None:
+                    raise ValueError("The project 3MF component object could not be found.")
+                component_transform = parse_transform(component.attrib.get("transform"))
+                for vertex in component_object.iter():
+                    if vertex.tag.rsplit("}", 1)[-1] != "vertex":
+                        continue
+                    try:
+                        point = (float(vertex.attrib["x"]), float(vertex.attrib["y"]), float(vertex.attrib["z"]))
+                    except (KeyError, ValueError) as exc:
+                        raise ValueError("The project 3MF contains an invalid mesh vertex.") from exc
+                    vertices.append(transform_point(component_transform, point))
+            if vertices:
+                return vertices
+
+        vertices = []
+        for vertex in object_node.iter():
+            if vertex.tag.rsplit("}", 1)[-1] != "vertex":
+                continue
+            try:
+                vertices.append((float(vertex.attrib["x"]), float(vertex.attrib["y"]), float(vertex.attrib["z"])))
+            except (KeyError, ValueError) as exc:
+                raise ValueError("The project 3MF contains an invalid mesh vertex.") from exc
+        if not vertices:
+            raise ValueError("The project 3MF build object has no mesh vertices.")
+        return vertices
 
     placements = []
     plate_index = 0
@@ -233,16 +313,14 @@ def repair_project_plate_layout(
     cursor_y = margin_mm
     row_height = 0.0
     for item_index, item in enumerate(build_items):
-        raw = (item.attrib.get("transform") or "1 0 0 0 1 0 0 0 1 0 0 0").split()
-        if len(raw) != 12:
-            raise ValueError("The project 3MF contains an invalid instance transform.")
-        try:
-            values = [float(value) for value in raw]
-        except ValueError as exc:
-            raise ValueError("The project 3MF contains a non-numeric instance transform.") from exc
-        width = abs(values[0]) * dx + abs(values[3]) * dy + abs(values[6]) * dz
-        depth = abs(values[1]) * dx + abs(values[4]) * dy + abs(values[7]) * dz
-        height = abs(values[2]) * dx + abs(values[5]) * dy + abs(values[8]) * dz
+        values = parse_transform(item.attrib.get("transform"))
+        object_vertices = vertices_for_build_object(item.attrib.get("objectid"))
+        oriented = [transform_point(values, point, include_translation=False) for point in object_vertices]
+        mins = [min(point[axis] for point in oriented) for axis in range(3)]
+        maxs = [max(point[axis] for point in oriented) for axis in range(3)]
+        width, depth, height = [maxs[axis] - mins[axis] for axis in range(3)]
+        if width <= 0 or depth <= 0 or height <= 0:
+            raise ValueError("The project 3MF contains a zero-size oriented object.")
         if width > usable_x + 1e-6 or depth > usable_y + 1e-6 or height > bed_z + 1e-6:
             raise ValueError("Orca's selected orientation does not fit the selected printer envelope.")
 
@@ -256,16 +334,23 @@ def repair_project_plate_layout(
             cursor_y = margin_mm
             row_height = 0.0
 
-        tx = cursor_x + width / 2.0
-        ty = cursor_y + depth / 2.0
-        tz = height / 2.0
+        # Use the actual embedded mesh bounds, not the source STL's assumed
+        # centre. Orca stores source offsets separately and imported models are
+        # not guaranteed to be centred at the 3MF object origin.
+        tx = cursor_x - mins[0]
+        ty = cursor_y - mins[1]
+        tz = -mins[2]
         values[9:12] = [tx, ty, tz]
         item.set("transform", " ".join(f"{value:.8g}" for value in values))
         placements.append(
             {
                 "object_id": item.attrib.get("objectid"),
                 "plate_index": plate_index + 1,
-                "center_mm": [round(tx, 6), round(ty, 6), round(tz, 6)],
+                "translation_mm": [round(tx, 6), round(ty, 6), round(tz, 6)],
+                "placed_bounds_mm": [
+                    [round(cursor_x, 6), round(cursor_y, 6), 0.0],
+                    [round(cursor_x + width, 6), round(cursor_y + depth, 6), round(height, 6)],
+                ],
                 "footprint_mm": [round(width, 6), round(depth, 6), round(height, 6)],
             }
         )
