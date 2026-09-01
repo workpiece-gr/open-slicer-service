@@ -1,0 +1,255 @@
+name: Open slicer CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "chris/**"
+      - "panos/**"
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Compile Python
+        run: python -m compileall -q app tests
+
+      - name: Run unit tests
+        run: PYTHONPATH=. pytest -q
+
+  docker-project:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build Orca service image
+        run: docker build -t workpiece-open-slicer:cp2b .
+
+      - name: Start service
+        run: |
+          docker run -d --name workpiece-slicer -p 8080:8080 \
+            -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e ALLOWED_ORIGINS=http://localhost:3000 \
+            -e ORCA_DEBUG_LOGS=1 \
+            -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
+            workpiece-open-slicer:cp2b
+
+      - name: Wait for health
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health > /tmp/health.json; then
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs workpiece-slicer
+          exit 1
+
+      - name: Generate integration STL fixtures
+        run: |
+          python - <<'PY'
+          import struct
+          from pathlib import Path
+
+          faces = [
+              (0,2,1),(0,3,2),(4,5,6),(4,6,7),
+              (0,1,5),(0,5,4),(1,2,6),(1,6,5),
+              (2,3,7),(2,7,6),(3,0,4),(3,4,7),
+          ]
+
+          def write_box(path, x, y, z):
+              vertices = [
+                  (0,0,0),(x,0,0),(x,y,0),(0,y,0),
+                  (0,0,z),(x,0,z),(x,y,z),(0,y,z),
+              ]
+              with Path(path).open("wb") as handle:
+                  handle.write(b"Workpiece CP2b Docker fixture".ljust(80, b"\0"))
+                  handle.write(struct.pack("<I", len(faces)))
+                  for face in faces:
+                      points = [vertices[index] for index in face]
+                      handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
+
+          write_box("/tmp/workpiece-cube.stl", 20, 20, 20)
+          write_box("/tmp/workpiece-multiplate.stl", 80, 80, 20)
+          write_box("/tmp/workpiece-ratrig-only.stl", 250, 20, 20)
+          PY
+
+      - name: Build and reopen editable project 3MF
+        run: |
+          set +e
+          curl --fail-with-body --max-time 240 \
+            -F file=@/tmp/workpiece-cube.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=3 \
+            -F printer=auto \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/project.json
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            cat /tmp/project.json || true
+            docker logs workpiece-slicer
+            exit "$status"
+          fi
+          python - <<'PY'
+          import base64
+          import json
+          import zipfile
+          from io import BytesIO
+
+          payload = json.load(open("/tmp/project.json", encoding="utf-8"))
+          assert payload["experimental"] is True
+          assert payload["printer"]["key"] == "ender3_generic_235"
+          assert payload["printer"]["temporary_generic"] is True
+          assert payload["request"]["quantity"] == 3
+          assert payload["request"]["orientation"] == "orca_auto"
+          assert payload["request"]["arrangement"] == "orca_auto"
+          assert payload["request"]["supports"] == "automatic"
+          assert payload["project"]["inspection"]["instance_count"] == 3
+          assert payload["project"]["inspection"]["embedded"]["project_settings"] is True
+          assert payload["verification"]["reopened_in_fresh_orca_process"] is True
+          assert payload["verification"]["plate_count"] >= 1
+          project = base64.b64decode(payload["project"]["base64"], validate=True)
+          with zipfile.ZipFile(BytesIO(project)) as archive:
+              assert "3D/3dmodel.model" in archive.namelist()
+              assert "Metadata/project_settings.config" in archive.namelist()
+          project_bytes = base64.b64decode(payload["project"]["base64"], validate=True)
+          open("/tmp/workpiece-ender-project.3mf", "wb").write(project_bytes)
+          print(json.dumps({
+              "printer": payload["printer"],
+              "project_sha256": payload["project"]["sha256"],
+              "instances": payload["project"]["inspection"]["instance_count"],
+              "plates": payload["verification"]["plate_count"],
+              "filament_g": payload["verification"]["total_filament_grams"],
+          }, indent=2))
+          PY
+
+      - name: Verify RatRig envelope and PCTG fallback
+        run: |
+          set -e
+          curl --fail-with-body --max-time 300 \
+            -F file=@/tmp/workpiece-ratrig-only.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=2 \
+            -F printer=auto \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/ratrig-project.json
+          curl --fail-with-body --max-time 300 \
+            -F file=@/tmp/workpiece-cube.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=1 \
+            -F printer=ratrig_vcore3_300 \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/ratrig-small-pla-project.json
+          curl --fail-with-body --max-time 300 \
+            -F file=@/tmp/workpiece-cube.stl \
+            -F material=pctg \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=1 \
+            -F printer=auto \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/pctg-project.json
+          python - <<'PY'
+          import base64
+          import json
+
+          ratrig = json.load(open("/tmp/ratrig-project.json", encoding="utf-8"))
+          ratrig_small = json.load(open("/tmp/ratrig-small-pla-project.json", encoding="utf-8"))
+          pctg = json.load(open("/tmp/pctg-project.json", encoding="utf-8"))
+          assert ratrig["printer"]["key"] == "ratrig_vcore3_300"
+          assert ratrig_small["printer"]["key"] == "ratrig_vcore3_300"
+          assert ratrig_small["project"]["inspection"]["instance_count"] == 1
+          assert ratrig_small["verification"]["reopened_in_fresh_orca_process"] is True
+          assert ratrig_small["verification"]["total_filament_grams"] > 0
+          assert ratrig["printer"]["temporary_generic"] is False
+          assert ratrig["project"]["inspection"]["instance_count"] == 2
+          assert ratrig["verification"]["reopened_in_fresh_orca_process"] is True
+          assert ratrig["verification"]["total_filament_grams"] > 0
+          assert pctg["printer"]["key"] == "ratrig_vcore3_300"
+          assert pctg["request"]["material"] == "pctg"
+          assert pctg["verification"]["reopened_in_fresh_orca_process"] is True
+          open("/tmp/workpiece-ratrig-project.3mf", "wb").write(base64.b64decode(ratrig["project"]["base64"], validate=True))
+          print(json.dumps({
+              "large_part_printer": ratrig["printer"]["key"],
+              "pctg_printer": pctg["printer"]["key"],
+              "large_part_instances": ratrig["project"]["inspection"]["instance_count"],
+          }, indent=2))
+          PY
+
+      - name: Force and verify multi-plate arrangement
+        run: |
+          set +e
+          curl --fail-with-body --max-time 300 \
+            -F file=@/tmp/workpiece-multiplate.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=12 \
+            -F printer=auto \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/multiplate-project.json
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            cat /tmp/multiplate-project.json || true
+            docker logs workpiece-slicer
+            exit "$status"
+          fi
+          python - <<'PY'
+          import json
+
+          payload = json.load(open("/tmp/multiplate-project.json", encoding="utf-8"))
+          assert payload["printer"]["key"] == "ender3_generic_235"
+          assert payload["request"]["quantity"] == 12
+          assert payload["project"]["inspection"]["instance_count"] == 12
+          assert payload["verification"]["reopened_in_fresh_orca_process"] is True
+          assert payload["verification"]["plate_count"] > 1
+          assert len(payload["verification"]["plates"]) == payload["verification"]["plate_count"]
+          assert payload["verification"]["total_filament_grams"] > 0
+          import base64
+          open("/tmp/workpiece-multiplate-project.3mf", "wb").write(base64.b64decode(payload["project"]["base64"], validate=True))
+          print(json.dumps({
+              "instances": payload["project"]["inspection"]["instance_count"],
+              "plates": payload["verification"]["plate_count"],
+              "filament_g": payload["verification"]["total_filament_grams"],
+          }, indent=2))
+          PY
+
+      - name: Upload generated project 3MF fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp2b-orca-project-3mf
+          path: |
+            /tmp/workpiece-ender-project.3mf
+            /tmp/workpiece-ratrig-project.3mf
+            /tmp/workpiece-multiplate-project.3mf
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker logs workpiece-slicer || true
