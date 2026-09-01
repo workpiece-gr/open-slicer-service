@@ -49,6 +49,7 @@ MAX_PREVIEW_MOVES = int(os.getenv("MAX_PREVIEW_MOVES", "30000"))
 MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
 MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
 ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
+RATRIG_OFFICIAL_MACHINE = ORCA_RESOURCE_ROOT / "Ratrig" / "machine" / "RatRig V-Core 3 300 0.4 nozzle.json"
 
 MATERIALS = {
     "pla": {
@@ -307,7 +308,15 @@ def build_ender_generic_filament(material: str, destination: Path) -> dict:
 def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
     if printer == "ratrig_vcore3_300":
         material_profile = MATERIALS[material]
-        machine_path = PROFILE_FILES["machine"]
+        # Use Orca's pinned system RatRig machine definition for editable
+        # project export. The current Workpiece user-copy machine profile is
+        # valid for direct slicing but OrcaSlicer 2.4.2 exports broken plate
+        # placement from it (duplicate transforms and no plate instances).
+        # Keep the custom process/filament profiles; only the machine shell is
+        # swapped here while CP2b isolates that Orca project-export behavior.
+        if not RATRIG_OFFICIAL_MACHINE.is_file():
+            raise HTTPException(status_code=503, detail="The pinned OrcaSlicer RatRig machine profile is not available.")
+        machine_path = RATRIG_OFFICIAL_MACHINE
         process_base = material_profile["process"]
         filament_path = material_profile["filament"]
     elif printer == "ender3_generic_235":
