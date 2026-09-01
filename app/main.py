@@ -548,6 +548,11 @@ async def build_project(
             filament_profile=filament_path,
             sources=instance_paths,
             project_path=project_path,
+            # OrcaSlicer 2.4.2's forced CLI auto-orientation can emit invalid
+            # plate placement for the current RatRig user profile during
+            # editable 3MF export. Preserve the input orientation for RatRig
+            # until the authoritative Workpiece orientation stage is wired in.
+            auto_orient=selected_printer != "ratrig_vcore3_300",
         )
         run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
         if not project_path.is_file():
