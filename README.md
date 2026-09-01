@@ -95,7 +95,7 @@ curl -F file=@part.stl \
 
 The JSON response includes the project as base64 only for this experiment. A later production checkpoint should replace that transport with Workpiece-owned object storage/binary artifact handoff.
 
-**Do not make this endpoint production-authoritative until real Orca 2.4.2 Docker acceptance confirms multi-instance/multi-plate arrangement, project reopen, support behavior and desktop Orca compatibility.**
+Real OrcaSlicer 2.4.2 Docker acceptance now covers Ender quantity, RatRig routing, PCTG fallback, fresh-process reopen/slice, and a 12-instance / 3-plate project. A desktop Orca acceptance check also opened and sliced the generated RatRig project successfully. The endpoint remains experimental because production authentication, concurrency/resource controls, durable artifact storage, calibrated Ender profiles, and full manufacturing provenance are still pending.
 
 ## Publish to GitHub
 
