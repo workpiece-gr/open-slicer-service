@@ -183,6 +183,7 @@ def build_process_profile(
     destination: Path,
     material_label: str = "",
     automatic_supports: bool = False,
+    project_reopen_safe: bool = False,
 ) -> dict:
     try:
         profile = json.loads(base_path.read_text(encoding="utf-8"))
@@ -212,6 +213,13 @@ def build_process_profile(
                 "support_on_build_plate_only": "0",
             }
         )
+    if project_reopen_safe:
+        # OrcaSlicer 2.4.2 validates reopened project 3MFs more strictly than
+        # the initial export. With relative extrusion (M83), it requires G92 E0
+        # in layer_gcode to avoid cumulative floating-point loss.
+        layer_gcode = str(profile.get("layer_gcode") or "")
+        if "G92 E0" not in layer_gcode.upper():
+            profile["layer_gcode"] = (layer_gcode.rstrip() + "\nG92 E0").lstrip()
     destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return profile
 
@@ -279,7 +287,15 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
 
     process_path = job / "project-process.json"
     material_label = MATERIALS[material]["label"] if material in MATERIALS else material.upper()
-    build_process_profile(process_base, quality, strength, process_path, str(material_label), automatic_supports=True)
+    build_process_profile(
+        process_base,
+        quality,
+        strength,
+        process_path,
+        str(material_label),
+        automatic_supports=True,
+        project_reopen_safe=True,
+    )
     return machine_path, process_path, filament_path
 
 
