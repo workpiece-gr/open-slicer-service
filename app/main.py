@@ -269,13 +269,13 @@ def build_ratrig_project_machine(destination: Path) -> dict:
             "name": "Workpiece RatRig V-Core 3 300 project",
             "from": "user",
             "instantiation": "true",
+            "inherits": "RatRig V-Core 3 300 0.4 nozzle",
             "printer_settings_id": "Workpiece RatRig V-Core 3 300 project",
             "printer_structure": "corexy",
             "printable_area": ["0x0", "300x0", "300x300", "0x300"],
             "printable_height": "300",
         }
     )
-    profile.pop("inherits", None)
     destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return profile
 
