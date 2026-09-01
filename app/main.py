@@ -319,6 +319,10 @@ def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=504, detail=f"OrcaSlicer exceeded {timeout} seconds.") from exc
     if completed.returncode != 0:
+        if env.get("ORCA_DEBUG_LOGS") == "1":
+            print("ORCA DEBUG command:", " ".join(command), flush=True)
+            print("ORCA DEBUG stdout:", (completed.stdout or "")[-10000:], flush=True)
+            print("ORCA DEBUG stderr:", (completed.stderr or "")[-10000:], flush=True)
         raise HTTPException(status_code=422, detail="OrcaSlicer could not build or verify the requested project.")
     return completed
 
