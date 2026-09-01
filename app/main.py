@@ -580,9 +580,9 @@ async def build_project(
             # post-export layout repair fixes the known 2.4.2 CLI placement
             # defect while preserving Orca's selected orientation matrix.
             auto_orient=True,
-            # Do not let the RatRig arranger add arbitrary Z rotations; the
-            # arranger add arbitrary Z rotations. The 2.4.2 CLI has produced
-            # wasteful 45-degree placement for long rectangular parts here.
+            # Do not let the RatRig arranger add arbitrary Z rotations. The
+            # 2.4.2 CLI has produced wasteful 45-degree placement for long
+            # rectangular parts here.
             allow_arrange_rotations=selected_printer != "ratrig_vcore3_300",
         )
         run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
