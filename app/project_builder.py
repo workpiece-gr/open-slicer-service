@@ -181,7 +181,6 @@ def inspect_project_3mf(path: Path) -> dict:
 def repair_project_plate_layout(
     path: Path,
     *,
-    source_dimensions_mm: list[float],
     envelope_mm: tuple[float, float, float],
     # Keep enough clearance for RatRig's first-layer skirt/brim. With a
     # 5 mm object margin Orca 2.4.2 generated skirt extrusion at about
@@ -190,8 +189,6 @@ def repair_project_plate_layout(
     gap_mm: float = 8.0,
 ) -> dict:
     """Repair Orca 2.4.2 CLI plate placement while preserving its orientation matrices."""
-    if len(source_dimensions_mm) != 3 or any(float(value) <= 0 for value in source_dimensions_mm):
-        raise ValueError("Source dimensions are invalid for project layout repair.")
     if not zipfile.is_zipfile(path):
         raise ValueError("Cannot repair layout in a non-3MF archive.")
 
