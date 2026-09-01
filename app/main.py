@@ -55,6 +55,9 @@ RATRIG_ROOT = ORCA_RESOURCE_ROOT / "Ratrig"
 RATRIG_MACHINE_COMMON = RATRIG_ROOT / "machine" / "fdm_machine_common.json"
 RATRIG_KLIPPER_COMMON = RATRIG_ROOT / "machine" / "fdm_klipper_common.json"
 RATRIG_OFFICIAL_MACHINE = RATRIG_ROOT / "machine" / "RatRig V-Core 3 300 0.4 nozzle.json"
+RATRIG_PROCESS_COMMON = RATRIG_ROOT / "process" / "fdm_process_common.json"
+RATRIG_PROCESS_FAMILY = RATRIG_ROOT / "process" / "fdm_process_ratrig_common.json"
+RATRIG_PROCESS_STANDARD = RATRIG_ROOT / "process" / "0.20mm Standard @RatRig.json"
 
 MATERIALS = {
     "pla": {
@@ -305,6 +308,34 @@ def build_ratrig_project_machine(destination: Path) -> dict:
     return profile
 
 
+def build_ratrig_project_process_base(source: Path, destination: Path) -> dict:
+    # Resolve the pinned RatRig process inheritance chain before applying the
+    # Workpiece quality/strength overrides. Orca's CLI otherwise re-applies
+    # the parent preset compatibility list and rejects the standalone project
+    # machine with CLI_PROCESS_NOT_COMPATIBLE (-17).
+    sources = [
+        RATRIG_PROCESS_COMMON,
+        RATRIG_PROCESS_FAMILY,
+        RATRIG_PROCESS_STANDARD,
+        source,
+    ]
+    profile: dict = {}
+    try:
+        for item in sources:
+            profile.update(json.loads(item.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid RatRig process profile chain: {exc}") from exc
+    if profile.get("type") != "process":
+        raise RuntimeError("The resolved RatRig process profile must have type=process")
+    profile.pop("inherits", None)
+    profile.pop("compatible_printers", None)
+    profile.pop("compatible_printers_condition", None)
+    profile["from"] = "user"
+    profile["instantiation"] = "true"
+    destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return profile
+
+
 def build_ratrig_project_filament(source: Path, destination: Path) -> dict:
     try:
         profile = json.loads(source.read_text(encoding="utf-8"))
@@ -382,7 +413,8 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
         material_profile = MATERIALS[material]
         machine_path = job / "ratrig-project-machine.json"
         build_ratrig_project_machine(machine_path)
-        process_base = material_profile["process"]
+        process_base = job / "ratrig-project-process-base.json"
+        build_ratrig_project_process_base(material_profile["process"], process_base)
         filament_path = job / "ratrig-project-filament.json"
         build_ratrig_project_filament(material_profile["filament"], filament_path)
     elif printer == "ender3_generic_235":
