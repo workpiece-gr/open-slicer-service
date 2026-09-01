@@ -9,7 +9,6 @@ from app.project_builder import (
     fits_axis_permutation,
     inspect_project_3mf,
     inspect_stl,
-    patch_project_settings,
     repair_project_plate_layout,
     verify_project_command,
 )
@@ -37,6 +36,18 @@ def test_inspect_stl_and_machine_fit(tmp_path: Path):
     assert fits_axis_permutation(inspected["dimensions_mm"], (235, 235, 235))
     assert not fits_axis_permutation([236, 20, 20], (235, 235, 235))
     assert fits_axis_permutation([236, 20, 20], (300, 300, 300))
+
+
+def test_requested_machine_rejects_oversize_part():
+    from fastapi import HTTPException
+    from app.main import choose_project_printer
+
+    try:
+        choose_project_printer("ender3_generic_235", "pla", [250, 20, 20])
+    except HTTPException as exc:
+        assert exc.status_code == 422
+    else:
+        raise AssertionError("Expected explicit Ender routing to reject an oversized part.")
 
 
 def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Path):
@@ -185,20 +196,6 @@ def test_project_reopen_safety_preserves_existing_layer_gcode(tmp_path: Path):
     )
     assert result["layer_change_gcode"].startswith("M117 Layer change")
     assert result["layer_change_gcode"].strip().endswith("G92 E0")
-
-
-def test_patch_project_settings_preserves_archive_and_updates_machine_structure(tmp_path: Path):
-    project = tmp_path / "patch.3mf"
-    with zipfile.ZipFile(project, "w") as archive:
-        archive.writestr("[Content_Types].xml", "<Types/>")
-        archive.writestr("Metadata/project_settings.config", json.dumps({"printer_structure": "i3", "printable_height": "300"}))
-        archive.writestr("3D/3dmodel.model", "<model/>")
-    patch_project_settings(project, {"printer_structure": "corexy"})
-    with zipfile.ZipFile(project) as archive:
-        settings = json.loads(archive.read("Metadata/project_settings.config"))
-        assert settings["printer_structure"] == "corexy"
-        assert settings["printable_height"] == "300"
-        assert archive.read("3D/3dmodel.model") == b"<model/>"
 
 
 def test_repair_project_plate_layout_centers_instances_and_builds_plate_membership(tmp_path: Path):
