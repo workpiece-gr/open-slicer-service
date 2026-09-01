@@ -104,16 +104,51 @@ def inspect_project_3mf(path: Path) -> dict:
         if model_name not in names:
             raise ValueError("The exported 3MF does not contain 3D/3dmodel.model.")
         root = ElementTree.fromstring(archive.read(model_name))
-        build_items = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "item"]
+        build_nodes = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "item"]
+        build_items = [
+            {
+                "object_id": node.attrib.get("objectid"),
+                "transform": node.attrib.get("transform"),
+                "printable": node.attrib.get("printable"),
+            }
+            for node in build_nodes
+        ]
+        plates = []
+        model_settings_name = "Metadata/model_settings.config"
+        if model_settings_name in names:
+            settings_root = ElementTree.fromstring(archive.read(model_settings_name))
+            for plate_node in (node for node in settings_root if node.tag.rsplit("}", 1)[-1] == "plate"):
+                metadata = {}
+                instances = []
+                for child in plate_node:
+                    local = child.tag.rsplit("}", 1)[-1]
+                    if local == "metadata":
+                        metadata[child.attrib.get("key", "")] = child.attrib.get("value")
+                    elif local == "model_instance":
+                        instance_metadata = {
+                            grandchild.attrib.get("key", ""): grandchild.attrib.get("value")
+                            for grandchild in child
+                            if grandchild.tag.rsplit("}", 1)[-1] == "metadata"
+                        }
+                        instances.append(instance_metadata)
+                plates.append(
+                    {
+                        "plater_id": metadata.get("plater_id"),
+                        "model_instance_count": len(instances),
+                        "model_instances": instances,
+                    }
+                )
         embedded = {
             "project_settings": "Metadata/project_settings.config" in names,
-            "model_settings": "Metadata/model_settings.config" in names,
+            "model_settings": model_settings_name in names,
             "machine_presets": sorted(name for name in names if name.startswith("Metadata/machine_settings_")),
             "process_presets": sorted(name for name in names if name.startswith("Metadata/process_settings_")),
             "filament_presets": sorted(name for name in names if name.startswith("Metadata/filament_settings_")),
         }
         return {
             "instance_count": len(build_items),
+            "build_items": build_items,
+            "plates": plates,
             "embedded": embedded,
             "entries": len(names),
         }
