@@ -77,6 +77,19 @@ def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Pa
     orient_index = no_orient.index("--orient")
     assert no_orient[orient_index + 1] == "0"
 
+    no_rotate = build_project_command(
+        orca_bin=Path("/opt/orca/AppRun"),
+        machine_profile=tmp_path / "machine.json",
+        process_profile=tmp_path / "process.json",
+        filament_profile=tmp_path / "filament.json",
+        sources=[tmp_path / "source-no-rotate.stl"],
+        project_path=tmp_path / "workpiece-no-rotate.3mf",
+        auto_orient=False,
+        allow_arrange_rotations=False,
+    )
+    rotation_index = no_rotate.index("--allow-rotations")
+    assert no_rotate[rotation_index + 1] == "0"
+
     verify = verify_project_command(
         orca_bin=Path("/opt/orca/AppRun"),
         project_path=tmp_path / "workpiece-production.3mf",
