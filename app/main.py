@@ -586,6 +586,7 @@ async def slice_model(
     quality: Annotated[str, Form()] = "balanced",
     strength: Annotated[str, Form()] = "functional",
     preoriented: Annotated[bool, Form()] = False,
+    printer: Annotated[str, Form()] = "ratrig_vcore3_300",
 ) -> dict:
     if material not in MATERIALS:
         raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
@@ -593,6 +594,10 @@ async def slice_model(
         raise HTTPException(status_code=422, detail=f"quality must be one of: {', '.join(QUALITY)}")
     if strength not in STRENGTH:
         raise HTTPException(status_code=422, detail=f"strength must be one of: {', '.join(STRENGTH)}")
+    if printer not in PROJECT_PRINTERS:
+        raise HTTPException(status_code=422, detail=f"printer must be one of: {', '.join(PROJECT_PRINTERS)}")
+    if material not in PROJECT_PRINTERS[printer]["materials"]:
+        raise HTTPException(status_code=422, detail=f"{material.upper()} is not supported by {printer}.")
     filename = file.filename or "upload.stl"
     if Path(filename).suffix.lower() != ".stl":
         raise HTTPException(status_code=415, detail="The pilot Orca service accepts STL files only.")
@@ -610,14 +615,29 @@ async def slice_model(
         output_dir.mkdir()
         upload_size = await save_upload(file, input_path)
         process_path = job / "process.json"
-        effective = build_process_profile(
-            material_profile["process"],
-            quality,
-            strength,
-            process_path,
-            str(material_profile["label"]),
-        )
-        settings_arg = f"{PROFILE_FILES['machine']};{process_path}"
+        if printer == "ratrig_vcore3_300":
+            machine_path = PROFILE_FILES["machine"]
+            filament_path = material_profile["filament"]
+            effective = build_process_profile(
+                material_profile["process"],
+                quality,
+                strength,
+                process_path,
+                str(material_profile["label"]),
+            )
+        else:
+            machine_path = job / "ender3-machine.json"
+            build_ender_generic_machine(machine_path)
+            filament_path = ENDER_GENERIC_FILAMENTS[material]
+            effective = build_process_profile(
+                ENDER_GENERIC_PROCESS,
+                quality,
+                strength,
+                process_path,
+                str(material_profile["label"]),
+                automatic_supports=True,
+            )
+        settings_arg = f"{machine_path};{process_path}"
         xdg_root = job / "xdg"
         xdg_config, xdg_cache, xdg_data = xdg_root / "config", xdg_root / "cache", xdg_root / "data"
         for directory in (xdg_config, xdg_cache, xdg_data):
@@ -633,7 +653,7 @@ async def slice_model(
             "--ensure-on-bed",
             "--allow-newer-file",
             "--load-settings", settings_arg,
-            "--load-filaments", str(material_profile["filament"]),
+            "--load-filaments", str(filament_path),
             "--outputdir", str(output_dir),
             str(input_path),
         ])
@@ -682,12 +702,15 @@ async def slice_model(
                 "quality": quality,
                 "strength": strength,
                 "preoriented": preoriented,
+                "printer": printer,
             },
             "effective_process": {
                 "material": material_profile["label"],
                 "layer_height_mm": float(effective["layer_height"]),
                 "wall_loops": int(effective["wall_loops"]),
                 "infill_percent": 20,
+                "printer": printer,
+                "temporary_generic_machine_profile": bool(PROJECT_PRINTERS[printer]["temporary_generic"]),
             },
             "summary": summary,
             "toolpath": preview,
