@@ -231,7 +231,6 @@ def test_repair_project_plate_layout_centers_instances_and_builds_plate_membersh
         archive.writestr("Metadata/project_settings.config", "{}")
     result = repair_project_plate_layout(
         project,
-        source_dimensions_mm=[250, 20, 20],
         envelope_mm=(300, 300, 300),
     )
     assert result["plate_count"] == 1
@@ -272,7 +271,6 @@ def test_repair_project_plate_layout_uses_orca_virtual_plate_grid(tmp_path: Path
         archive.writestr("Metadata/project_settings.config", "{}")
     result = repair_project_plate_layout(
         project,
-        source_dimensions_mm=[250, 250, 20],
         envelope_mm=(300, 300, 300),
     )
     assert result["plate_count"] == 2
