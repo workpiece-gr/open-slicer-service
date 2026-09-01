@@ -215,11 +215,12 @@ def build_process_profile(
         )
     if project_reopen_safe:
         # OrcaSlicer 2.4.2 validates reopened project 3MFs more strictly than
-        # the initial export. With relative extrusion (M83), it requires G92 E0
-        # in layer_gcode to avoid cumulative floating-point loss.
-        layer_gcode = str(profile.get("layer_gcode") or "")
-        if "G92 E0" not in layer_gcode.upper():
-            profile["layer_gcode"] = (layer_gcode.rstrip() + "\nG92 E0").lstrip()
+        # the initial export. With relative extrusion on Marlin it requires an
+        # exact uppercase G92 E0 in before_layer_change_gcode or
+        # layer_change_gcode. Use the latter and preserve any existing script.
+        layer_change_gcode = str(profile.get("layer_change_gcode") or "")
+        if "G92 E0" not in layer_change_gcode:
+            profile["layer_change_gcode"] = (layer_change_gcode.rstrip() + "\nG92 E0").lstrip()
     destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return profile
 
