@@ -209,7 +209,10 @@ def repair_project_plate_layout(
     *,
     source_dimensions_mm: list[float],
     envelope_mm: tuple[float, float, float],
-    margin_mm: float = 5.0,
+    # Keep enough clearance for RatRig's first-layer skirt/brim. With a
+    # 5 mm object margin Orca 2.4.2 generated skirt extrusion at about
+    # -2.6 mm, which correctly failed its printable-area verifier.
+    margin_mm: float = 12.0,
     gap_mm: float = 8.0,
 ) -> dict:
     """Repair Orca 2.4.2 CLI plate placement while preserving its orientation matrices."""
