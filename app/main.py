@@ -498,25 +498,36 @@ def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]
                     if result_file.is_file():
                         print("ORCA DEBUG result.json:", result_file.read_text(encoding="utf-8", errors="ignore")[-8000:], flush=True)
                     for gcode in sorted(output_dir.glob("*.gcode"))[:4]:
-                        axis_re = re.compile(r"([XY])([+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+))")
+                        axis_re = re.compile(r"([XY])\\s*([+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+))", re.I)
+                        motion_re = re.compile(r"^\\s*G0?1?\\b", re.I)
                         minimum = {"X": math.inf, "Y": math.inf}
                         maximum = {"X": -math.inf, "Y": -math.inf}
                         suspicious = []
+                        preview_lines = []
                         with gcode.open("r", encoding="utf-8", errors="ignore") as handle:
-                            for line in handle:
+                            for line_number, line in enumerate(handle, start=1):
+                                if len(preview_lines) < 80:
+                                    preview_lines.append(line.rstrip())
                                 code = line.split(";", 1)[0].strip()
-                                if not (code.startswith("G0 ") or code.startswith("G1 ")):
+                                if not motion_re.match(code):
                                     continue
                                 for axis, raw_value in axis_re.findall(code):
                                     value = float(raw_value)
+                                    axis = axis.upper()
                                     minimum[axis] = min(minimum[axis], value)
                                     maximum[axis] = max(maximum[axis], value)
                                     if (value < -0.01 or value > 300.01) and len(suspicious) < 40:
-                                        suspicious.append(code)
+                                        suspicious.append({"line": line_number, "code": code})
                         print(
                             "ORCA DEBUG gcode XY:",
                             gcode.name,
-                            {"min": minimum, "max": maximum, "suspicious": suspicious},
+                            {
+                                "bytes": gcode.stat().st_size,
+                                "min": minimum,
+                                "max": maximum,
+                                "suspicious": suspicious,
+                                "head": preview_lines,
+                            },
                             flush=True,
                         )
                 except Exception as debug_exc:
