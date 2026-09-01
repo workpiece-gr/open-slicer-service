@@ -51,7 +51,10 @@ MAX_PREVIEW_MOVES = int(os.getenv("MAX_PREVIEW_MOVES", "30000"))
 MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
 MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
 ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
-RATRIG_OFFICIAL_MACHINE = ORCA_RESOURCE_ROOT / "Ratrig" / "machine" / "RatRig V-Core 3 300 0.4 nozzle.json"
+RATRIG_ROOT = ORCA_RESOURCE_ROOT / "Ratrig"
+RATRIG_MACHINE_COMMON = RATRIG_ROOT / "machine" / "fdm_machine_common.json"
+RATRIG_KLIPPER_COMMON = RATRIG_ROOT / "machine" / "fdm_klipper_common.json"
+RATRIG_OFFICIAL_MACHINE = RATRIG_ROOT / "machine" / "RatRig V-Core 3 300 0.4 nozzle.json"
 
 MATERIALS = {
     "pla": {
@@ -261,30 +264,35 @@ async def save_upload(upload: UploadFile, destination: Path) -> int:
 
 
 def build_ratrig_project_machine(destination: Path) -> dict:
+    # Resolve Orca's pinned RatRig inheritance chain into one standalone
+    # machine profile for project export. This avoids the CLI arranger bug seen
+    # with the imported Workpiece user-copy preset while retaining the actual
+    # RatRig machine limits and G-code configuration.
+    sources = [
+        RATRIG_MACHINE_COMMON,
+        RATRIG_KLIPPER_COMMON,
+        RATRIG_OFFICIAL_MACHINE,
+        PROFILE_FILES["machine"],
+    ]
+    profile: dict = {}
     try:
-        profile = json.loads(PROFILE_FILES["machine"].read_text(encoding="utf-8"))
+        for source in sources:
+            profile.update(json.loads(source.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid Workpiece RatRig machine profile: {exc}") from exc
+        raise RuntimeError(f"Invalid RatRig machine profile chain: {exc}") from exc
     if profile.get("type") != "machine":
-        raise RuntimeError("The Workpiece RatRig profile must have type=machine")
-    # Orca's CLI arranger behaves incorrectly for the imported RatRig preset
-    # while printer_structure is left as "undefine": large parts can be
-    # exported with negative build coordinates and no plate membership.
-    # RatRig V-Core 3 is a CoreXY machine, so make that geometry explicit for
-    # project generation and remove the external inheritance dependency.
+        raise RuntimeError("The resolved RatRig profile must have type=machine")
+    profile.pop("inherits", None)
     profile.update(
         {
-            "name": "Workpiece RatRig V-Core 3 300 project",
+            # Keep Orca's official preset identity so the existing RatRig
+            # process and filament compatibility lists remain valid.
+            "name": "RatRig V-Core 3 300 0.4 nozzle",
             "from": "user",
             "instantiation": "true",
-            "inherits": "RatRig V-Core 3 300 0.4 nozzle",
-            "printer_settings_id": "Workpiece RatRig V-Core 3 300 project",
-            # OrcaSlicer 2.4.2's CLI arranger only assigns the imported
-            # RatRig objects to a plate reliably when the arrangement pass
-            # uses the i3 alignment path. This field is changed back to the
-            # physically correct CoreXY value inside the exported 3MF before
-            # fresh-process verification.
-            "printer_structure": "i3",
+            "printer_settings_id": "RatRig V-Core 3 300 0.4 nozzle",
+            "printer_model": "RatRig V-Core 3 300",
+            "printer_structure": "corexy",
             "printable_area": ["0x0", "300x0", "300x300", "0x300"],
             "printable_height": "300",
         }
@@ -349,7 +357,8 @@ def build_ender_generic_filament(material: str, destination: Path) -> dict:
 def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
     if printer == "ratrig_vcore3_300":
         material_profile = MATERIALS[material]
-        machine_path = PROFILE_FILES["machine"]
+        machine_path = job / "ratrig-project-machine.json"
+        build_ratrig_project_machine(machine_path)
         process_base = material_profile["process"]
         filament_path = material_profile["filament"]
     elif printer == "ender3_generic_235":
@@ -636,15 +645,6 @@ async def build_project(
             project_path = candidates[0]
 
         layout_repair = None
-        if selected_printer == "ratrig_vcore3_300" and quantity == 1:
-            try:
-                layout_repair = repair_project_plate_layout(
-                    project_path,
-                    source_dimensions_mm=inspection["dimensions_mm"],
-                    envelope_mm=PROJECT_PRINTERS[selected_printer]["envelope_mm"],
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         project_bytes = project_path.stat().st_size
         if project_bytes <= 0 or project_bytes > MAX_PROJECT_BYTES:
