@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import math
@@ -16,6 +17,15 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+
+from .project_builder import (
+    build_project_command,
+    fits_axis_permutation,
+    inspect_project_3mf,
+    inspect_stl,
+    sha256_file,
+    verify_project_command,
+)
 
 
 QUALITY = {
@@ -36,6 +46,9 @@ SOURCE_CODE_URL = os.getenv("SOURCE_CODE_URL", "")
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 SLICE_TIMEOUT_SECONDS = int(os.getenv("SLICE_TIMEOUT_SECONDS", "180"))
 MAX_PREVIEW_MOVES = int(os.getenv("MAX_PREVIEW_MOVES", "30000"))
+MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
+MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
+ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
 
 MATERIALS = {
     "pla": {
@@ -68,6 +81,30 @@ PROFILE_FILES = {"machine": PROFILE_ROOT / "machine.json"}
 for material_key, material_profile in MATERIALS.items():
     PROFILE_FILES[f"{material_key}_process"] = material_profile["process"]
     PROFILE_FILES[f"{material_key}_filament"] = material_profile["filament"]
+
+ENDER_GENERIC_ROOT = ORCA_RESOURCE_ROOT / "Creality"
+ENDER_GENERIC_MACHINE = ENDER_GENERIC_ROOT / "machine" / "Creality Ender-3 0.4 nozzle.json"
+ENDER_GENERIC_PROCESS = ENDER_GENERIC_ROOT / "process" / "0.20mm Standard @Creality Ender3 0.4.json"
+ENDER_GENERIC_FILAMENTS = {
+    "pla": ENDER_GENERIC_ROOT / "filament" / "Creality Generic PLA.json",
+    "petg": ENDER_GENERIC_ROOT / "filament" / "Creality Generic PETG.json",
+    "abs": ENDER_GENERIC_ROOT / "filament" / "Creality Generic ABS.json",
+    "tpu": ENDER_GENERIC_ROOT / "filament" / "Creality Generic TPU.json",
+}
+PROJECT_PRINTERS = {
+    "ratrig_vcore3_300": {
+        "label": "RatRig V-Core 3 300 / 0.4 mm",
+        "envelope_mm": (300.0, 300.0, 300.0),
+        "temporary_generic": False,
+        "materials": tuple(MATERIALS.keys()),
+    },
+    "ender3_generic_235": {
+        "label": "Ender 3 generic / 0.4 mm (temporary)",
+        "envelope_mm": (235.0, 235.0, 235.0),
+        "temporary_generic": True,
+        "materials": tuple(ENDER_GENERIC_FILAMENTS.keys()),
+    },
+}
 
 app = FastAPI(
     title="Open Slicer Service",
@@ -119,6 +156,11 @@ def health() -> dict:
         "profiles_ready": profile_state,
         "source_ready": source_ready,
         "profile_files": {name: path.is_file() for name, path in PROFILE_FILES.items()},
+        "project_3mf": {
+            "experimental": True,
+            "ender_generic_profiles_ready": ENDER_GENERIC_MACHINE.is_file() and ENDER_GENERIC_PROCESS.is_file() and all(path.is_file() for path in ENDER_GENERIC_FILAMENTS.values()),
+            "printers": {key: {"label": value["label"], "envelope_mm": value["envelope_mm"], "temporary_generic": value["temporary_generic"]} for key, value in PROJECT_PRINTERS.items()},
+        },
     }
 
 
@@ -135,6 +177,7 @@ def build_process_profile(
     strength: str,
     destination: Path,
     material_label: str = "",
+    automatic_supports: bool = False,
 ) -> dict:
     try:
         profile = json.loads(base_path.read_text(encoding="utf-8"))
@@ -153,6 +196,17 @@ def build_process_profile(
             "sparse_infill_density": "20%",
         }
     )
+    if automatic_supports:
+        support_type = str(profile.get("support_type") or "tree(auto)").replace("(manual)", "(auto)")
+        if "(auto)" not in support_type:
+            support_type = "tree(auto)"
+        profile.update(
+            {
+                "enable_support": "1",
+                "support_type": support_type,
+                "support_on_build_plate_only": "0",
+            }
+        )
     destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return profile
 
@@ -168,6 +222,104 @@ async def save_upload(upload: UploadFile, destination: Path) -> int:
     if size < 84:
         raise HTTPException(status_code=400, detail="The uploaded STL is empty or incomplete.")
     return size
+
+
+def build_ender_generic_machine(destination: Path) -> dict:
+    try:
+        profile = json.loads(ENDER_GENERIC_MACHINE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid bundled Ender 3 machine profile: {exc}") from exc
+    if profile.get("type") != "machine":
+        raise RuntimeError("The bundled Ender 3 profile must have type=machine")
+    # Temporary Workpiece envelope requested for the two Ender 3-class machines.
+    # Replace this override with the real printer profiles before production authority.
+    profile.update(
+        {
+            "from": "user",
+            "instantiation": "true",
+            "printable_area": ["0x0", "235x0", "235x235", "0x235"],
+            "printable_height": "235",
+            "printer_notes": "Workpiece temporary generic Ender 3 profile; replace with measured production profile.",
+        }
+    )
+    destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return profile
+
+
+def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
+    if printer == "ratrig_vcore3_300":
+        material_profile = MATERIALS[material]
+        machine_path = PROFILE_FILES["machine"]
+        process_base = material_profile["process"]
+        filament_path = material_profile["filament"]
+    elif printer == "ender3_generic_235":
+        if material not in ENDER_GENERIC_FILAMENTS:
+            raise HTTPException(status_code=422, detail=f"The temporary Ender 3 profile does not yet support {material.upper()}.")
+        missing = [path for path in (ENDER_GENERIC_MACHINE, ENDER_GENERIC_PROCESS, ENDER_GENERIC_FILAMENTS[material]) if not path.is_file()]
+        if missing:
+            raise HTTPException(status_code=503, detail="The pinned OrcaSlicer Ender 3 generic profiles are not available.")
+        machine_path = job / "ender3-machine.json"
+        build_ender_generic_machine(machine_path)
+        process_base = ENDER_GENERIC_PROCESS
+        filament_path = ENDER_GENERIC_FILAMENTS[material]
+    else:
+        raise HTTPException(status_code=422, detail=f"Unknown project printer: {printer}")
+
+    process_path = job / "project-process.json"
+    material_label = MATERIALS[material]["label"] if material in MATERIALS else material.upper()
+    build_process_profile(process_base, quality, strength, process_path, str(material_label), automatic_supports=True)
+    return machine_path, process_path, filament_path
+
+
+def choose_project_printer(requested: str, material: str, dimensions_mm: list[float]) -> str:
+    if requested != "auto":
+        if requested not in PROJECT_PRINTERS:
+            raise HTTPException(status_code=422, detail=f"printer must be auto or one of: {', '.join(PROJECT_PRINTERS)}")
+        if material not in PROJECT_PRINTERS[requested]["materials"]:
+            raise HTTPException(status_code=422, detail=f"{material.upper()} is not supported by {requested}.")
+        return requested
+    ender = PROJECT_PRINTERS["ender3_generic_235"]
+    if material in ender["materials"] and fits_axis_permutation(dimensions_mm, ender["envelope_mm"]):
+        return "ender3_generic_235"
+    ratrig = PROJECT_PRINTERS["ratrig_vcore3_300"]
+    if fits_axis_permutation(dimensions_mm, ratrig["envelope_mm"]):
+        return "ratrig_vcore3_300"
+    raise HTTPException(status_code=422, detail="The STL exceeds both configured Workpiece FDM envelopes before Orca orientation.")
+
+
+def isolated_orca_env(job: Path) -> dict[str, str]:
+    xdg_root = job / "xdg"
+    xdg_config, xdg_cache, xdg_data = xdg_root / "config", xdg_root / "cache", xdg_root / "data"
+    for directory in (xdg_config, xdg_cache, xdg_data):
+        directory.mkdir(parents=True, exist_ok=True)
+    return {
+        **os.environ,
+        "XDG_CONFIG_HOME": str(xdg_config),
+        "XDG_CACHE_HOME": str(xdg_cache),
+        "XDG_DATA_HOME": str(xdg_data),
+    }
+
+
+def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(status_code=504, detail=f"OrcaSlicer exceeded {timeout} seconds.") from exc
+    if completed.returncode != 0:
+        raise HTTPException(status_code=422, detail="OrcaSlicer could not build or verify the requested project.")
+    return completed
+
+
+def find_outputs(directory: Path) -> list[Path]:
+    return sorted(directory.rglob("*.gcode"), key=lambda item: item.name)
 
 
 def parse_duration_seconds(value: str) -> int | None:
@@ -268,6 +420,153 @@ def find_output(directory: Path) -> Path:
     if not candidates:
         raise RuntimeError("OrcaSlicer completed without producing a .gcode file.")
     return candidates[0]
+
+
+@app.post("/v1/project")
+async def build_project(
+    file: Annotated[UploadFile, File(description="Single-colour STL")],
+    material: Annotated[str, Form()] = "pla",
+    quality: Annotated[str, Form()] = "balanced",
+    strength: Annotated[str, Form()] = "functional",
+    quantity: Annotated[int, Form()] = 1,
+    printer: Annotated[str, Form()] = "auto",
+) -> dict:
+    if material not in MATERIALS:
+        raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
+    if quality not in QUALITY:
+        raise HTTPException(status_code=422, detail=f"quality must be one of: {', '.join(QUALITY)}")
+    if strength not in STRENGTH:
+        raise HTTPException(status_code=422, detail=f"strength must be one of: {', '.join(STRENGTH)}")
+    if quantity < 1 or quantity > MAX_PROJECT_QUANTITY:
+        raise HTTPException(status_code=422, detail=f"quantity must be between 1 and {MAX_PROJECT_QUANTITY}")
+    filename = file.filename or "upload.stl"
+    if Path(filename).suffix.lower() != ".stl":
+        raise HTTPException(status_code=415, detail="The experimental project builder accepts STL files only.")
+    if not ORCA_BIN.is_file():
+        raise HTTPException(status_code=503, detail="The pinned OrcaSlicer binary is not available.")
+
+    with tempfile.TemporaryDirectory(prefix="open-project-") as temporary:
+        job = Path(temporary)
+        input_path = job / "source-original.stl"
+        upload_size = await save_upload(file, input_path)
+        try:
+            inspection = inspect_stl(input_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        selected_printer = choose_project_printer(printer, material, inspection["dimensions_mm"])
+        machine_path, process_path, filament_path = project_profile_paths(selected_printer, material, job, quality, strength)
+        project_path = job / "workpiece-production.3mf"
+        env = isolated_orca_env(job)
+
+        export_command = build_project_command(
+            orca_bin=ORCA_BIN,
+            machine_profile=machine_path,
+            process_profile=process_path,
+            filament_profile=filament_path,
+            source=input_path,
+            project_path=project_path,
+            quantity=quantity,
+        )
+        run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
+        if not project_path.is_file():
+            candidates = sorted(job.rglob("*.3mf"), key=lambda item: item.stat().st_size, reverse=True)
+            if not candidates:
+                raise HTTPException(status_code=422, detail="OrcaSlicer completed without exporting an editable project 3MF.")
+            project_path = candidates[0]
+
+        project_bytes = project_path.stat().st_size
+        if project_bytes <= 0 or project_bytes > MAX_PROJECT_BYTES:
+            raise HTTPException(status_code=422, detail="The generated project 3MF is outside the supported size limit.")
+        try:
+            project_inspection = inspect_project_3mf(project_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if project_inspection["instance_count"] != quantity:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Orca project quantity verification failed: expected {quantity}, found {project_inspection['instance_count']}.",
+            )
+        if not project_inspection["embedded"]["project_settings"]:
+            raise HTTPException(status_code=422, detail="The exported 3MF did not embed project settings.")
+
+        verification_dir = job / "verify"
+        verification_dir.mkdir()
+        verify_command = verify_project_command(orca_bin=ORCA_BIN, project_path=project_path, output_dir=verification_dir)
+        run_orca(verify_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
+        gcode_files = find_outputs(verification_dir)
+        if not gcode_files:
+            raise HTTPException(status_code=422, detail="The exported project could not be reopened and sliced by a fresh Orca process.")
+
+        plates = []
+        total_time = 0
+        total_filament = 0.0
+        for index, gcode in enumerate(gcode_files, start=1):
+            summary = parse_gcode_summary(gcode)
+            if not summary["print_time_seconds"] or not summary["filament_grams"] or not summary["layer_count"]:
+                raise HTTPException(status_code=422, detail="Fresh-project verification produced incomplete slice statistics.")
+            total_time += int(summary["print_time_seconds"])
+            total_filament += float(summary["filament_grams"])
+            plates.append(
+                {
+                    "index": index,
+                    "filename": gcode.name,
+                    "summary": summary,
+                    "gcode_sha256": sha256_file(gcode),
+                }
+            )
+
+        profile = PROJECT_PRINTERS[selected_printer]
+        return {
+            "experimental": True,
+            "engine": {
+                "name": "OrcaSlicer",
+                "version": ORCA_VERSION,
+                "source": SOURCE_CODE_URL or None,
+            },
+            "source": {
+                "filename": Path(filename).name,
+                "upload_bytes": upload_size,
+                "sha256": sha256_file(input_path),
+                "inspection": inspection,
+            },
+            "printer": {
+                "key": selected_printer,
+                "label": profile["label"],
+                "envelope_mm": profile["envelope_mm"],
+                "temporary_generic": profile["temporary_generic"],
+                "selection": "automatic_smallest_capable" if printer == "auto" else "requested",
+            },
+            "request": {
+                "material": material,
+                "quality": quality,
+                "strength": strength,
+                "quantity": quantity,
+                "supports": "automatic",
+                "orientation": "orca_auto",
+                "arrangement": "orca_auto",
+            },
+            "project": {
+                "filename": "workpiece-production.3mf",
+                "media_type": "model/3mf",
+                "bytes": project_bytes,
+                "sha256": sha256_file(project_path),
+                "base64": base64.b64encode(project_path.read_bytes()).decode("ascii"),
+                "inspection": project_inspection,
+            },
+            "verification": {
+                "reopened_in_fresh_orca_process": True,
+                "plate_count": len(plates),
+                "plates": plates,
+                "total_print_time_seconds": total_time,
+                "total_filament_grams": round(total_filament, 3),
+            },
+            "warnings": [
+                "Experimental CP2b: the editable project 3MF must be manually opened in OrcaSlicer desktop before production use.",
+                "The Ender 3 profile is a temporary Orca-derived generic profile with a Workpiece 235 x 235 x 235 mm envelope override; replace it with measured machine profiles.",
+                "Automatic orientation, arrangement and supports require acceptance testing with representative Workpiece models before manufacturing authority.",
+            ],
+        }
 
 
 @app.post("/v1/slice")
