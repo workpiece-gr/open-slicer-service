@@ -87,8 +87,8 @@ def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Pa
         auto_orient=False,
         allow_arrange_rotations=False,
     )
-    rotation_index = no_rotate.index("--allow-rotations")
-    assert no_rotate[rotation_index + 1] == "0"
+    assert "--no-allow-rotations" in no_rotate
+    assert "--allow-rotations" not in no_rotate
 
     verify = verify_project_command(
         orca_bin=Path("/opt/orca/AppRun"),
