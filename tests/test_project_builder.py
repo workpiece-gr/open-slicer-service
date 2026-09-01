@@ -10,6 +10,7 @@ from app.project_builder import (
     inspect_project_3mf,
     inspect_stl,
     patch_project_settings,
+    repair_project_plate_layout,
     verify_project_command,
 )
 
@@ -196,3 +197,43 @@ def test_patch_project_settings_preserves_archive_and_updates_machine_structure(
         assert settings["printer_structure"] == "corexy"
         assert settings["printable_height"] == "300"
         assert archive.read("3D/3dmodel.model") == b"<model/>"
+
+
+def test_repair_project_plate_layout_centers_instances_and_builds_plate_membership(tmp_path: Path):
+    project = tmp_path / "layout.3mf"
+    model = """<?xml version="1.0" encoding="UTF-8"?>
+    <model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+           xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+           requiredextensions="p">
+      <resources>
+        <object id="2" type="model"><mesh /></object>
+        <object id="4" type="model"><mesh /></object>
+      </resources>
+      <build>
+        <item objectid="2" transform="1 0 0 0 1 0 0 0 1 125 -70 0" printable="1"/>
+        <item objectid="4" transform="1 0 0 0 1 0 0 0 1 125 -70 0" printable="1"/>
+      </build>
+    </model>"""
+    settings = """<?xml version="1.0" encoding="UTF-8"?>
+    <config>
+      <object id="2"/><object id="4"/>
+      <plate><metadata key="plater_id" value="1"/></plate>
+      <assemble/>
+    </config>"""
+    with zipfile.ZipFile(project, "w") as archive:
+        archive.writestr("3D/3dmodel.model", model)
+        archive.writestr("Metadata/model_settings.config", settings)
+        archive.writestr("Metadata/project_settings.config", "{}")
+    result = repair_project_plate_layout(
+        project,
+        source_dimensions_mm=[250, 20, 20],
+        envelope_mm=(300, 300, 300),
+    )
+    assert result["plate_count"] == 1
+    assert [item["plate_index"] for item in result["placements"]] == [1, 1]
+    inspected = inspect_project_3mf(project)
+    assert inspected["instance_count"] == 2
+    assert inspected["plates"][0]["model_instance_count"] == 2
+    centers = [item["center_mm"] for item in result["placements"]]
+    assert centers[0][1] > 0
+    assert centers[1][1] > 0
