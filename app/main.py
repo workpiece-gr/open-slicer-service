@@ -91,6 +91,13 @@ ENDER_GENERIC_FILAMENTS = {
     "abs": ENDER_GENERIC_ROOT / "filament" / "Creality Generic ABS.json",
     "tpu": ENDER_GENERIC_ROOT / "filament" / "Creality Generic TPU.json",
 }
+ENDER_GENERIC_FILAMENT_COMMON = ENDER_GENERIC_ROOT / "filament" / "fdm_filament_common.json"
+ENDER_GENERIC_FILAMENT_BASES = {
+    "pla": ENDER_GENERIC_ROOT / "filament" / "fdm_filament_pla.json",
+    "petg": ENDER_GENERIC_ROOT / "filament" / "fdm_filament_pet.json",
+    "abs": ENDER_GENERIC_ROOT / "filament" / "fdm_filament_abs.json",
+    "tpu": ENDER_GENERIC_ROOT / "filament" / "fdm_filament_tpu.json",
+}
 PROJECT_PRINTERS = {
     "ratrig_vcore3_300": {
         "label": "RatRig V-Core 3 300 / 0.4 mm",
@@ -132,7 +139,13 @@ def profiles_ready() -> bool:
 
 
 def ender_generic_profiles_ready() -> bool:
-    paths = [ENDER_GENERIC_MACHINE, ENDER_GENERIC_PROCESS, *ENDER_GENERIC_FILAMENTS.values()]
+    paths = [
+        ENDER_GENERIC_MACHINE,
+        ENDER_GENERIC_PROCESS,
+        ENDER_GENERIC_FILAMENT_COMMON,
+        *ENDER_GENERIC_FILAMENT_BASES.values(),
+        *ENDER_GENERIC_FILAMENTS.values(),
+    ]
     return all(path.is_file() and path.stat().st_size > 20 for path in paths)
 
 
@@ -267,6 +280,30 @@ def build_ender_generic_machine(destination: Path) -> dict:
     return profile
 
 
+def build_ender_generic_filament(material: str, destination: Path) -> dict:
+    if material not in ENDER_GENERIC_FILAMENTS:
+        raise HTTPException(status_code=422, detail=f"The temporary Ender 3 profile does not support {material.upper()}.")
+    paths = [
+        ENDER_GENERIC_FILAMENT_COMMON,
+        ENDER_GENERIC_FILAMENT_BASES[material],
+        ENDER_GENERIC_FILAMENTS[material],
+    ]
+    merged: dict = {}
+    try:
+        for source in paths:
+            merged.update(json.loads(source.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid bundled Ender 3 filament profile chain: {exc}") from exc
+    if merged.get("type") != "filament":
+        raise RuntimeError("The resolved Ender 3 filament profile must have type=filament")
+    merged.pop("inherits", None)
+    merged["from"] = "user"
+    merged["instantiation"] = "true"
+    merged["filament_settings_id"] = [str(merged.get("name") or f"Workpiece {material.upper()}")]
+    destination.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return merged
+
+
 def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
     if printer == "ratrig_vcore3_300":
         material_profile = MATERIALS[material]
@@ -282,7 +319,8 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
         machine_path = job / "ender3-machine.json"
         build_ender_generic_machine(machine_path)
         process_base = ENDER_GENERIC_PROCESS
-        filament_path = ENDER_GENERIC_FILAMENTS[material]
+        filament_path = job / "ender3-filament.json"
+        build_ender_generic_filament(material, filament_path)
     else:
         raise HTTPException(status_code=422, detail=f"Unknown project printer: {printer}")
 
@@ -674,7 +712,8 @@ async def slice_model(
         else:
             machine_path = job / "ender3-machine.json"
             build_ender_generic_machine(machine_path)
-            filament_path = ENDER_GENERIC_FILAMENTS[material]
+            filament_path = job / "ender3-filament.json"
+            build_ender_generic_filament(material, filament_path)
             effective = build_process_profile(
                 ENDER_GENERIC_PROCESS,
                 quality,
