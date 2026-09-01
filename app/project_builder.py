@@ -174,7 +174,7 @@ def build_project_command(
     command = [
         "xvfb-run", "-a", str(orca_bin),
         "--arrange", "1",
-        "--allow-rotations", "1" if allow_arrange_rotations else "0",
+        *([] if allow_arrange_rotations else ["--no-allow-rotations"]),
         *(["--orient", "1"] if auto_orient else ["--orient", "0"]),
         "--ensure-on-bed",
         "--allow-newer-file",
