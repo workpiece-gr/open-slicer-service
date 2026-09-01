@@ -23,7 +23,6 @@ from .project_builder import (
     fits_axis_permutation,
     inspect_project_3mf,
     inspect_stl,
-    patch_project_settings,
     repair_project_plate_layout,
     sha256_file,
     verify_project_command,
@@ -51,13 +50,6 @@ MAX_PREVIEW_MOVES = int(os.getenv("MAX_PREVIEW_MOVES", "30000"))
 MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
 MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
 ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
-RATRIG_ROOT = ORCA_RESOURCE_ROOT / "Ratrig"
-RATRIG_MACHINE_COMMON = RATRIG_ROOT / "machine" / "fdm_machine_common.json"
-RATRIG_KLIPPER_COMMON = RATRIG_ROOT / "machine" / "fdm_klipper_common.json"
-RATRIG_OFFICIAL_MACHINE = RATRIG_ROOT / "machine" / "RatRig V-Core 3 300 0.4 nozzle.json"
-RATRIG_PROCESS_COMMON = RATRIG_ROOT / "process" / "fdm_process_common.json"
-RATRIG_PROCESS_FAMILY = RATRIG_ROOT / "process" / "fdm_process_ratrig_common.json"
-RATRIG_PROCESS_STANDARD = RATRIG_ROOT / "process" / "0.20mm Standard @RatRig.json"
 
 MATERIALS = {
     "pla": {
@@ -207,7 +199,6 @@ def build_process_profile(
     automatic_supports: bool = False,
     project_reopen_safe: bool = False,
     single_colour_project: bool = False,
-    project_unrestricted_compatibility: bool = False,
 ) -> dict:
     try:
         profile = json.loads(base_path.read_text(encoding="utf-8"))
@@ -250,9 +241,6 @@ def build_process_profile(
         layer_change_gcode = str(profile.get("layer_change_gcode") or "")
         if "G92 E0" not in layer_change_gcode:
             profile["layer_change_gcode"] = (layer_change_gcode.rstrip() + "\nG92 E0").lstrip()
-    if project_unrestricted_compatibility:
-        profile.pop("compatible_printers", None)
-        profile.pop("compatible_printers_condition", None)
     destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return profile
 
@@ -268,91 +256,6 @@ async def save_upload(upload: UploadFile, destination: Path) -> int:
     if size < 84:
         raise HTTPException(status_code=400, detail="The uploaded STL is empty or incomplete.")
     return size
-
-
-def build_ratrig_project_machine(destination: Path) -> dict:
-    # Resolve Orca's pinned RatRig inheritance chain into one standalone
-    # machine profile for project export. This avoids the CLI arranger bug seen
-    # with the imported Workpiece user-copy preset while retaining the actual
-    # RatRig machine limits and G-code configuration.
-    sources = [
-        RATRIG_MACHINE_COMMON,
-        RATRIG_KLIPPER_COMMON,
-        RATRIG_OFFICIAL_MACHINE,
-        PROFILE_FILES["machine"],
-    ]
-    profile: dict = {}
-    try:
-        for source in sources:
-            profile.update(json.loads(source.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid RatRig machine profile chain: {exc}") from exc
-    if profile.get("type") != "machine":
-        raise RuntimeError("The resolved RatRig profile must have type=machine")
-    profile.update(
-        {
-            # OrcaSlicer 2.4.2 treats a user machine's inherits value as its
-            # system identity during process-compatibility checks.
-            "name": "Workpiece RatRig V-Core 3 300 project",
-            "from": "user",
-            "inherits": "RatRig V-Core 3 300 0.4 nozzle",
-            "instantiation": "true",
-            "printer_settings_id": "Workpiece RatRig V-Core 3 300 project",
-            "printer_model": "RatRig V-Core 3 300",
-            "printer_structure": "corexy",
-            "printable_area": ["0x0", "300x0", "300x300", "0x300"],
-            "printable_height": "300",
-        }
-    )
-    destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return profile
-
-
-def build_ratrig_project_process_base(source: Path, destination: Path) -> dict:
-    # Resolve the pinned RatRig process inheritance chain before applying the
-    # Workpiece quality/strength overrides. Orca's CLI otherwise re-applies
-    # the parent preset compatibility list and rejects the standalone project
-    # machine with CLI_PROCESS_NOT_COMPATIBLE (-17).
-    sources = [
-        RATRIG_PROCESS_COMMON,
-        RATRIG_PROCESS_FAMILY,
-        RATRIG_PROCESS_STANDARD,
-        source,
-    ]
-    profile: dict = {}
-    try:
-        for item in sources:
-            profile.update(json.loads(item.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid RatRig process profile chain: {exc}") from exc
-    if profile.get("type") != "process":
-        raise RuntimeError("The resolved RatRig process profile must have type=process")
-    profile.pop("inherits", None)
-    profile["compatible_printers"] = ["RatRig V-Core 3 300 0.4 nozzle"]
-    profile.pop("compatible_printers_condition", None)
-    profile["from"] = "user"
-    profile["instantiation"] = "true"
-    destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return profile
-
-
-def build_ratrig_project_filament(source: Path, destination: Path) -> dict:
-    try:
-        profile = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid Workpiece RatRig filament profile: {exc}") from exc
-    if profile.get("type") != "filament":
-        raise RuntimeError("The Workpiece RatRig filament profile must have type=filament")
-    # Project export uses a standalone, fully-resolved machine shell. The
-    # original user filament's compatibility list points at the inherited
-    # system preset, so remove only that gate while preserving all material
-    # settings.
-    profile.pop("compatible_printers", None)
-    profile.pop("compatible_printers_condition", None)
-    profile["from"] = "user"
-    profile["instantiation"] = "true"
-    destination.write_text(json.dumps(profile, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return profile
 
 
 def build_ender_generic_machine(destination: Path) -> dict:
@@ -410,6 +313,8 @@ def build_ender_generic_filament(material: str, destination: Path) -> dict:
 
 def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
     if printer == "ratrig_vcore3_300":
+        if not profiles_ready():
+            raise HTTPException(status_code=503, detail="Validated RatRig profiles are not installed.")
         material_profile = MATERIALS[material]
         machine_path = PROFILE_FILES["machine"]
         process_base = material_profile["process"]
@@ -417,7 +322,14 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
     elif printer == "ender3_generic_235":
         if material not in ENDER_GENERIC_FILAMENTS:
             raise HTTPException(status_code=422, detail=f"The temporary Ender 3 profile does not yet support {material.upper()}.")
-        missing = [path for path in (ENDER_GENERIC_MACHINE, ENDER_GENERIC_PROCESS, ENDER_GENERIC_FILAMENTS[material]) if not path.is_file()]
+        required = (
+            ENDER_GENERIC_MACHINE,
+            ENDER_GENERIC_PROCESS,
+            ENDER_GENERIC_FILAMENT_COMMON,
+            ENDER_GENERIC_FILAMENT_BASES[material],
+            ENDER_GENERIC_FILAMENTS[material],
+        )
+        missing = [path for path in required if not path.is_file()]
         if missing:
             raise HTTPException(status_code=503, detail="The pinned OrcaSlicer Ender 3 generic profiles are not available.")
         machine_path = job / "ender3-machine.json"
@@ -439,7 +351,6 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
         automatic_supports=True,
         project_reopen_safe=True,
         single_colour_project=True,
-        project_unrestricted_compatibility=False,
     )
     return machine_path, process_path, filament_path
 
@@ -448,8 +359,11 @@ def choose_project_printer(requested: str, material: str, dimensions_mm: list[fl
     if requested != "auto":
         if requested not in PROJECT_PRINTERS:
             raise HTTPException(status_code=422, detail=f"printer must be auto or one of: {', '.join(PROJECT_PRINTERS)}")
-        if material not in PROJECT_PRINTERS[requested]["materials"]:
+        profile = PROJECT_PRINTERS[requested]
+        if material not in profile["materials"]:
             raise HTTPException(status_code=422, detail=f"{material.upper()} is not supported by {requested}.")
+        if not fits_axis_permutation(dimensions_mm, profile["envelope_mm"]):
+            raise HTTPException(status_code=422, detail=f"The STL does not fit the configured {requested} envelope.")
         return requested
     ender = PROJECT_PRINTERS["ender3_generic_235"]
     if material in ender["materials"] and fits_axis_permutation(dimensions_mm, ender["envelope_mm"]):
@@ -497,39 +411,6 @@ def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]
                     result_file = output_dir / "result.json"
                     if result_file.is_file():
                         print("ORCA DEBUG result.json:", result_file.read_text(encoding="utf-8", errors="ignore")[-8000:], flush=True)
-                    for gcode in sorted(output_dir.glob("*.gcode"))[:4]:
-                        axis_re = re.compile(r"([XY])\\s*([+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+))", re.I)
-                        motion_re = re.compile(r"^\\s*G0?1?\\b", re.I)
-                        minimum = {"X": math.inf, "Y": math.inf}
-                        maximum = {"X": -math.inf, "Y": -math.inf}
-                        suspicious = []
-                        preview_lines = []
-                        with gcode.open("r", encoding="utf-8", errors="ignore") as handle:
-                            for line_number, line in enumerate(handle, start=1):
-                                if len(preview_lines) < 80:
-                                    preview_lines.append(line.rstrip())
-                                code = line.split(";", 1)[0].strip()
-                                if not motion_re.match(code):
-                                    continue
-                                for axis, raw_value in axis_re.findall(code):
-                                    value = float(raw_value)
-                                    axis = axis.upper()
-                                    minimum[axis] = min(minimum[axis], value)
-                                    maximum[axis] = max(maximum[axis], value)
-                                    if (value < -0.01 or value > 300.01) and len(suspicious) < 40:
-                                        suspicious.append({"line": line_number, "code": code})
-                        print(
-                            "ORCA DEBUG gcode XY:",
-                            gcode.name,
-                            {
-                                "bytes": gcode.stat().st_size,
-                                "min": minimum,
-                                "max": maximum,
-                                "suspicious": suspicious,
-                                "head": preview_lines,
-                            },
-                            flush=True,
-                        )
                 except Exception as debug_exc:
                     print("ORCA DEBUG output inspection failed:", repr(debug_exc), flush=True)
         raise HTTPException(status_code=422, detail="OrcaSlicer could not build or verify the requested project.")
@@ -695,12 +576,11 @@ async def build_project(
             filament_profile=filament_path,
             sources=instance_paths,
             project_path=project_path,
-            # OrcaSlicer 2.4.2's forced CLI auto-orientation can emit invalid
-            # plate placement for the current RatRig user profile during
-            # editable 3MF export. Preserve the input orientation for RatRig
-            # until the authoritative Workpiece orientation stage is wired in.
+            # Keep Orca's 3D auto-orientation. For RatRig, deterministic
+            # post-export layout repair fixes the known 2.4.2 CLI placement
+            # defect while preserving Orca's selected orientation matrix.
             auto_orient=True,
-            # Preserve Orca's 3D auto-orientation, but do not let the RatRig
+            # Do not let the RatRig arranger add arbitrary Z rotations; the
             # arranger add arbitrary Z rotations. The 2.4.2 CLI has produced
             # wasteful 45-degree placement for long rectangular parts here.
             allow_arrange_rotations=selected_printer != "ratrig_vcore3_300",
