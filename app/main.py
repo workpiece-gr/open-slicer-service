@@ -289,15 +289,15 @@ def build_ratrig_project_machine(destination: Path) -> dict:
         raise RuntimeError(f"Invalid RatRig machine profile chain: {exc}") from exc
     if profile.get("type") != "machine":
         raise RuntimeError("The resolved RatRig profile must have type=machine")
-    profile.pop("inherits", None)
     profile.update(
         {
-            # Keep Orca's official preset identity so the existing RatRig
-            # process and filament compatibility lists remain valid.
-            "name": "RatRig V-Core 3 300 0.4 nozzle",
+            # OrcaSlicer 2.4.2 treats a user machine's inherits value as its
+            # system identity during process-compatibility checks.
+            "name": "Workpiece RatRig V-Core 3 300 project",
             "from": "user",
+            "inherits": "RatRig V-Core 3 300 0.4 nozzle",
             "instantiation": "true",
-            "printer_settings_id": "RatRig V-Core 3 300 0.4 nozzle",
+            "printer_settings_id": "Workpiece RatRig V-Core 3 300 project",
             "printer_model": "RatRig V-Core 3 300",
             "printer_structure": "corexy",
             "printable_area": ["0x0", "300x0", "300x300", "0x300"],
@@ -328,7 +328,7 @@ def build_ratrig_project_process_base(source: Path, destination: Path) -> dict:
     if profile.get("type") != "process":
         raise RuntimeError("The resolved RatRig process profile must have type=process")
     profile.pop("inherits", None)
-    profile.pop("compatible_printers", None)
+    profile["compatible_printers"] = ["RatRig V-Core 3 300 0.4 nozzle"]
     profile.pop("compatible_printers_condition", None)
     profile["from"] = "user"
     profile["instantiation"] = "true"
@@ -442,7 +442,7 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
         automatic_supports=True,
         project_reopen_safe=True,
         single_colour_project=True,
-        project_unrestricted_compatibility=printer == "ratrig_vcore3_300",
+        project_unrestricted_compatibility=False,
     )
     return machine_path, process_path, filament_path
 
