@@ -47,6 +47,7 @@ jobs:
             -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
             -e ALLOWED_ORIGINS=http://localhost:3000 \
             -e ORCA_DEBUG_LOGS=1 \
+            -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
             workpiece-open-slicer:cp2b
 
       - name: Wait for health

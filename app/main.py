@@ -50,6 +50,7 @@ MAX_PREVIEW_MOVES = int(os.getenv("MAX_PREVIEW_MOVES", "30000"))
 MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
 MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
 ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
+ENABLE_EXPERIMENTAL_PROJECT_API = os.getenv("ENABLE_EXPERIMENTAL_PROJECT_API", "0").strip().lower() in {"1", "true", "yes"}
 
 MATERIALS = {
     "pla": {
@@ -177,6 +178,7 @@ def health() -> dict:
         "profile_files": {name: path.is_file() for name, path in PROFILE_FILES.items()},
         "project_3mf": {
             "experimental": True,
+            "enabled": ENABLE_EXPERIMENTAL_PROJECT_API,
             "ender_generic_profiles_ready": ender_generic_profiles_ready(),
             "printers": {key: {"label": value["label"], "envelope_mm": value["envelope_mm"], "temporary_generic": value["temporary_generic"]} for key, value in PROJECT_PRINTERS.items()},
         },
@@ -530,6 +532,8 @@ async def build_project(
     quantity: Annotated[int, Form()] = 1,
     printer: Annotated[str, Form()] = "auto",
 ) -> dict:
+    if not ENABLE_EXPERIMENTAL_PROJECT_API:
+        raise HTTPException(status_code=404, detail="The experimental project builder is not enabled.")
     if material not in MATERIALS:
         raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
     if quality not in QUALITY:
