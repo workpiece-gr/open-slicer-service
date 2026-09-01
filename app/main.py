@@ -459,14 +459,24 @@ async def build_project(
         project_path = job / "workpiece-production.3mf"
         env = isolated_orca_env(job)
 
+        instance_paths = [input_path]
+        for index in range(2, quantity + 1):
+            instance_path = job / f"source-instance-{index:03d}.stl"
+            try:
+                os.link(input_path, instance_path)
+            except OSError:
+                # Hardlinks are normally available in the job temp directory.
+                # Fall back to the same immutable path rather than copying a
+                # potentially large STL N times.
+                instance_path = input_path
+            instance_paths.append(instance_path)
         export_command = build_project_command(
             orca_bin=ORCA_BIN,
             machine_profile=machine_path,
             process_profile=process_path,
             filament_profile=filament_path,
-            source=input_path,
+            sources=instance_paths,
             project_path=project_path,
-            quantity=quantity,
         )
         run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
         if not project_path.is_file():
