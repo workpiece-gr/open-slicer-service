@@ -58,34 +58,42 @@ def inspect_stl(path: Path) -> dict:
         triangle_count = struct.unpack("<I", header[80:84])[0]
         expected = 84 + triangle_count * 50
         if triangle_count > 0 and expected == size:
-            vertices = []
-            for _ in range(triangle_count):
-                record = handle.read(50)
-                if len(record) != 50:
-                    raise ValueError("The binary STL ended unexpectedly.")
-                values = struct.unpack("<12fH", record)
-                vertices.extend((values[3:6], values[6:9], values[9:12]))
-            bounds = _bounds_from_vertices(vertices)
+            def binary_vertices():
+                for _ in range(triangle_count):
+                    record = handle.read(50)
+                    if len(record) != 50:
+                        raise ValueError("The binary STL ended unexpectedly.")
+                    values = struct.unpack("<12fH", record)
+                    yield values[3:6]
+                    yield values[6:9]
+                    yield values[9:12]
+
+            bounds = _bounds_from_vertices(binary_vertices())
             return {
                 "encoding": "binary",
                 "triangle_count": triangle_count,
                 **bounds,
             }
 
-    text = path.read_text(encoding="utf-8", errors="ignore")
     vertex_re = re.compile(
         r"\bvertex\s+([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s+"
         r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s+"
         r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)",
         re.I,
     )
-    vertices = [tuple(float(value) for value in match.groups()) for match in vertex_re.finditer(text)]
-    if len(vertices) < 3 or len(vertices) % 3:
+
+    def ascii_vertices():
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                for match in vertex_re.finditer(line):
+                    yield tuple(float(value) for value in match.groups())
+
+    bounds = _bounds_from_vertices(ascii_vertices())
+    if bounds["vertex_count"] % 3:
         raise ValueError("The STL is neither a valid binary STL nor a supported ASCII STL.")
-    bounds = _bounds_from_vertices(vertices)
     return {
         "encoding": "ascii",
-        "triangle_count": len(vertices) // 3,
+        "triangle_count": bounds["vertex_count"] // 3,
         **bounds,
     }
 
