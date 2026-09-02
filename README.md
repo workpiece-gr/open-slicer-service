@@ -61,7 +61,7 @@ Supported material keys are `pla`, `petg`, `pctg`, `abs`, and `tpu`.
 
 ## Experimental editable project 3MF (CP2b)
 
-The `/v1/project` endpoint is the staged manufacturing-project builder. It remains separate from the public `/v1/slice` quote-preview path and is disabled by default. When enabled it requires a server-to-server bearer token (`WORKPIECE_PROJECT_API_TOKEN`) and serializes generation to one active Orca project build per service process.
+The `/v1/project` endpoint is the staged manufacturing-project builder. It remains separate from the public `/v1/slice` quote-preview path and is disabled by default. When enabled it requires a server-to-server bearer token (`WORKPIECE_PROJECT_API_TOKEN`) and serializes generation to one active Orca project build per service process. Until a distributed queue exists, deploy exactly one service replica if Workpiece must enforce one active project build globally.
 
 It accepts one original STL plus quantity/material/quality/strength and:
 
@@ -97,7 +97,7 @@ curl -H "Authorization: Bearer $WORKPIECE_PROJECT_API_TOKEN" \
   -o workpiece-production.3mf
 ```
 
-JSON/base64 remains available for regression testing. The production website uses binary transport, validates the returned hash/metadata, and stores the exact project bytes in Workpiece-owned object storage.
+JSON/base64 remains available for regression testing. Binary mode does not construct the base64 payload; the production website streams the response into Workpiece-owned R2 storage with SHA-256 enforcement and validates the retained object metadata.
 
 Real OrcaSlicer 2.4.2 Docker acceptance now covers Ender quantity, RatRig routing, PCTG fallback, fresh-process reopen/slice, and a 12-instance / 3-plate project. A desktop Orca acceptance check also opened and sliced the generated RatRig project successfully. Authentication, single-job concurrency control, binary handoff, profile hashes and website-owned durable artifact storage are staged in CP3. The temporary generic Ender profile remains the major machine-profile caveat, and desktop Orca inspection remains mandatory before printing.
 
@@ -122,7 +122,7 @@ SLICE_TIMEOUT_SECONDS=180
 MAX_PREVIEW_MOVES=30000
 ENABLE_EXPERIMENTAL_PROJECT_API=1
 WORKPIECE_PROJECT_API_TOKEN=<strong-random-server-to-server-secret>
-PROJECT_QUEUE_TIMEOUT_SECONDS=300
+PROJECT_QUEUE_TIMEOUT_SECONDS=30
 ```
 
 4. Generate a public Railway domain and open `/health` on it.
