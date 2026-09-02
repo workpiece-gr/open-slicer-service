@@ -8,13 +8,15 @@ import json
 import math
 import os
 import re
+import secrets
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
@@ -51,6 +53,10 @@ MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
 MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
 ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
 ENABLE_EXPERIMENTAL_PROJECT_API = os.getenv("ENABLE_EXPERIMENTAL_PROJECT_API", "0").strip().lower() in {"1", "true", "yes"}
+WORKPIECE_PROJECT_API_TOKEN = os.getenv("WORKPIECE_PROJECT_API_TOKEN", "").strip()
+PROJECT_QUEUE_TIMEOUT_SECONDS = max(1, int(os.getenv("PROJECT_QUEUE_TIMEOUT_SECONDS", "30")))
+SERVICE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip() or os.getenv("SOURCE_COMMIT_SHA", "").strip()
+PROJECT_GENERATION_LOCK = threading.Lock()
 
 MATERIALS = {
     "pla": {
@@ -117,7 +123,7 @@ PROJECT_PRINTERS = {
 
 app = FastAPI(
     title="Open Slicer Service",
-    version="0.3.0",
+    version="0.4.0",
     license_info={"name": "GNU AGPL-3.0-or-later", "url": "https://www.gnu.org/licenses/agpl-3.0.html"},
 )
 
@@ -151,6 +157,26 @@ def ender_generic_profiles_ready() -> bool:
     return all(path.is_file() and path.stat().st_size > 20 for path in paths)
 
 
+def project_access(authorization: Annotated[str | None, Header()] = None):
+    if not ENABLE_EXPERIMENTAL_PROJECT_API:
+        raise HTTPException(status_code=404, detail="The project builder is not enabled.")
+    if not WORKPIECE_PROJECT_API_TOKEN:
+        raise HTTPException(status_code=503, detail="The project builder service token is not configured.")
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not supplied or not secrets.compare_digest(supplied.strip(), WORKPIECE_PROJECT_API_TOKEN):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid project-builder service token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not PROJECT_GENERATION_LOCK.acquire(timeout=PROJECT_QUEUE_TIMEOUT_SECONDS):
+        raise HTTPException(status_code=503, detail="The project-builder queue is busy. Retry later.")
+    try:
+        yield
+    finally:
+        PROJECT_GENERATION_LOCK.release()
+
+
 @app.get("/")
 def root() -> dict:
     return {
@@ -179,6 +205,10 @@ def health() -> dict:
         "project_3mf": {
             "experimental": True,
             "enabled": ENABLE_EXPERIMENTAL_PROJECT_API,
+            "authenticated": bool(WORKPIECE_PROJECT_API_TOKEN),
+            "concurrency": 1,
+            "concurrency_scope": "single service process; deploy one replica until a distributed queue exists",
+            "queue_timeout_seconds": PROJECT_QUEUE_TIMEOUT_SECONDS,
             "ender_generic_profiles_ready": ender_generic_profiles_ready(),
             "printers": {key: {"label": value["label"], "envelope_mm": value["envelope_mm"], "temporary_generic": value["temporary_generic"]} for key, value in PROJECT_PRINTERS.items()},
         },
@@ -523,17 +553,18 @@ def find_output(directory: Path) -> Path:
     return candidates[0]
 
 
-@app.post("/v1/project")
+@app.post("/v1/project", response_model=None)
 async def build_project(
+    _project_access: Annotated[None, Depends(project_access)],
     file: Annotated[UploadFile, File(description="Single-colour STL")],
     material: Annotated[str, Form()] = "pla",
     quality: Annotated[str, Form()] = "balanced",
     strength: Annotated[str, Form()] = "functional",
     quantity: Annotated[int, Form()] = 1,
     printer: Annotated[str, Form()] = "auto",
-) -> dict:
-    if not ENABLE_EXPERIMENTAL_PROJECT_API:
-        raise HTTPException(status_code=404, detail="The experimental project builder is not enabled.")
+    verify: Annotated[bool, Form()] = True,
+    response_mode: Annotated[str, Form()] = "json",
+) -> dict | Response:
     if material not in MATERIALS:
         raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
     if quality not in QUALITY:
@@ -542,6 +573,8 @@ async def build_project(
         raise HTTPException(status_code=422, detail=f"strength must be one of: {', '.join(STRENGTH)}")
     if quantity < 1 or quantity > MAX_PROJECT_QUANTITY:
         raise HTTPException(status_code=422, detail=f"quantity must be between 1 and {MAX_PROJECT_QUANTITY}")
+    if response_mode not in {"json", "binary"}:
+        raise HTTPException(status_code=422, detail="response_mode must be json or binary")
     filename = file.filename or "upload.stl"
     if Path(filename).suffix.lower() != ".stl":
         raise HTTPException(status_code=415, detail="The experimental project builder accepts STL files only.")
@@ -624,50 +657,68 @@ async def build_project(
         if os.getenv("ORCA_DEBUG_LOGS") == "1":
             print("ORCA DEBUG project inspection:", json.dumps(project_inspection, separators=(",", ":")), flush=True)
 
-        verification_dir = job / "verify"
-        verification_dir.mkdir()
-        verify_command = verify_project_command(orca_bin=ORCA_BIN, project_path=project_path, output_dir=verification_dir)
-        run_orca(verify_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
-        gcode_files = find_outputs(verification_dir)
-        if not gcode_files:
-            raise HTTPException(status_code=422, detail="The exported project could not be reopened and sliced by a fresh Orca process.")
+        verification = {
+            "performed": False,
+            "reopened_in_fresh_orca_process": False,
+            "plate_count": None,
+            "plates": [],
+            "total_print_time_seconds": None,
+            "total_filament_grams": None,
+        }
+        if verify:
+            verification_dir = job / "verify"
+            verification_dir.mkdir()
+            verify_command = verify_project_command(orca_bin=ORCA_BIN, project_path=project_path, output_dir=verification_dir)
+            run_orca(verify_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
+            gcode_files = find_outputs(verification_dir)
+            if not gcode_files:
+                raise HTTPException(status_code=422, detail="The exported project could not be reopened and sliced by a fresh Orca process.")
 
-        plates = []
-        total_time = 0
-        total_filament = 0.0
-        for index, gcode in enumerate(gcode_files, start=1):
-            summary = parse_gcode_summary(gcode)
-            if not summary["print_time_seconds"] or not summary["filament_grams"] or not summary["layer_count"]:
-                if os.getenv("ORCA_DEBUG_LOGS") == "1":
-                    interesting = []
-                    with gcode.open("r", encoding="utf-8", errors="ignore") as handle:
-                        for line in handle:
-                            lower = line.lower()
-                            if any(token in lower for token in ("filament", "printing time", "estimated time", "layer")):
-                                interesting.append(line.rstrip())
-                                if len(interesting) >= 80:
-                                    break
-                    print("ORCA DEBUG incomplete summary:", summary, flush=True)
-                    print("ORCA DEBUG summary lines:\n" + "\n".join(interesting), flush=True)
-                raise HTTPException(status_code=422, detail="Fresh-project verification produced incomplete slice statistics.")
-            total_time += int(summary["print_time_seconds"])
-            total_filament += float(summary["filament_grams"])
-            plates.append(
-                {
-                    "index": index,
-                    "filename": gcode.name,
-                    "summary": summary,
-                    "gcode_sha256": sha256_file(gcode),
-                }
-            )
+            plates = []
+            total_time = 0
+            total_filament = 0.0
+            for index, gcode in enumerate(gcode_files, start=1):
+                summary = parse_gcode_summary(gcode)
+                if not summary["print_time_seconds"] or not summary["filament_grams"] or not summary["layer_count"]:
+                    if os.getenv("ORCA_DEBUG_LOGS") == "1":
+                        interesting = []
+                        with gcode.open("r", encoding="utf-8", errors="ignore") as handle:
+                            for line in handle:
+                                lower = line.lower()
+                                if any(token in lower for token in ("filament", "printing time", "estimated time", "layer")):
+                                    interesting.append(line.rstrip())
+                                    if len(interesting) >= 80:
+                                        break
+                        print("ORCA DEBUG incomplete summary:", summary, flush=True)
+                        print("ORCA DEBUG summary lines:\n" + "\n".join(interesting), flush=True)
+                    raise HTTPException(status_code=422, detail="Fresh-project verification produced incomplete slice statistics.")
+                total_time += int(summary["print_time_seconds"])
+                total_filament += float(summary["filament_grams"])
+                plates.append(
+                    {
+                        "index": index,
+                        "filename": gcode.name,
+                        "summary": summary,
+                        "gcode_sha256": sha256_file(gcode),
+                    }
+                )
+            verification = {
+                "performed": True,
+                "reopened_in_fresh_orca_process": True,
+                "plate_count": len(plates),
+                "plates": plates,
+                "total_print_time_seconds": total_time,
+                "total_filament_grams": round(total_filament, 3),
+            }
 
         profile = PROJECT_PRINTERS[selected_printer]
-        return {
+        payload = {
             "experimental": True,
             "engine": {
                 "name": "OrcaSlicer",
                 "version": ORCA_VERSION,
                 "source": SOURCE_CODE_URL or None,
+                "service_commit": SERVICE_COMMIT_SHA or None,
             },
             "source": {
                 "filename": Path(filename).name,
@@ -690,29 +741,83 @@ async def build_project(
                 "supports": "automatic",
                 "orientation": "orca_auto",
                 "arrangement": "orca_auto",
+                "verification_requested": verify,
+                "response_mode": response_mode,
+            },
+            "profiles": {
+                "machine": {
+                    "identity": f"{selected_printer}:machine",
+                    "sha256": sha256_file(machine_path),
+                },
+                "process": {
+                    "identity": f"{selected_printer}:{material}:{quality}:{strength}:process",
+                    "sha256": sha256_file(process_path),
+                },
+                "filament": {
+                    "identity": f"{selected_printer}:{material}:filament",
+                    "sha256": sha256_file(filament_path),
+                },
             },
             "project": {
                 "filename": "workpiece-production.3mf",
                 "media_type": "model/3mf",
                 "bytes": project_bytes,
                 "sha256": sha256_file(project_path),
-                "base64": base64.b64encode(project_path.read_bytes()).decode("ascii"),
                 "inspection": project_inspection,
                 "layout_repair": layout_repair,
             },
-            "verification": {
-                "reopened_in_fresh_orca_process": True,
-                "plate_count": len(plates),
-                "plates": plates,
-                "total_print_time_seconds": total_time,
-                "total_filament_grams": round(total_filament, 3),
-            },
+            "verification": verification,
             "warnings": [
                 "Experimental CP2b: the editable project 3MF must be manually opened in OrcaSlicer desktop before production use.",
                 "The Ender 3 profile is a temporary Orca-derived generic profile with a Workpiece 235 x 235 x 235 mm envelope override; replace it with measured machine profiles.",
                 "Automatic orientation, arrangement and supports require acceptance testing with representative Workpiece models before manufacturing authority.",
             ],
         }
+        if response_mode == "binary":
+            compact_inspection = {
+                "instance_count": project_inspection["instance_count"],
+                "plate_count": len(project_inspection.get("plates") or []),
+                "embedded": project_inspection["embedded"],
+            }
+            compact_metadata = {
+                "schema_version": 1,
+                "engine": payload["engine"],
+                "source": {
+                    "filename": payload["source"]["filename"],
+                    "sha256": payload["source"]["sha256"],
+                    "inspection": payload["source"]["inspection"],
+                },
+                "printer": payload["printer"],
+                "request": payload["request"],
+                "profiles": payload["profiles"],
+                "project": {
+                    "filename": payload["project"]["filename"],
+                    "media_type": payload["project"]["media_type"],
+                    "bytes": payload["project"]["bytes"],
+                    "sha256": payload["project"]["sha256"],
+                    "inspection": compact_inspection,
+                    "layout_repair": {
+                        "applied": layout_repair is not None,
+                        "plate_count": layout_repair.get("plate_count") if layout_repair else None,
+                    },
+                },
+                "verification": payload["verification"],
+                "warnings": payload["warnings"],
+            }
+            encoded_metadata = base64.urlsafe_b64encode(
+                json.dumps(compact_metadata, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+            ).decode("ascii")
+            return Response(
+                content=project_path.read_bytes(),
+                media_type="model/3mf",
+                headers={
+                    "Content-Disposition": 'attachment; filename="workpiece-production.3mf"',
+                    "X-Workpiece-Project-SHA256": payload["project"]["sha256"],
+                    "X-Workpiece-Project-Metadata": encoded_metadata,
+                },
+            )
+        payload["project"]["base64"] = base64.b64encode(project_path.read_bytes()).decode("ascii")
+        return payload
 
 
 @app.post("/v1/slice")

@@ -61,7 +61,7 @@ Supported material keys are `pla`, `petg`, `pctg`, `abs`, and `tpu`.
 
 ## Experimental editable project 3MF (CP2b)
 
-The `/v1/project` endpoint is an **experimental manufacturing-project builder**. It is intentionally separate from the existing `/v1/slice` quote-preview path and is disabled by default. Set `ENABLE_EXPERIMENTAL_PROJECT_API=1` only in a controlled validation environment.
+The `/v1/project` endpoint is the staged manufacturing-project builder. It remains separate from the public `/v1/slice` quote-preview path and is disabled by default. When enabled it requires a server-to-server bearer token (`WORKPIECE_PROJECT_API_TOKEN`) and serializes generation to one active Orca project build per service process. Until a distributed queue exists, deploy exactly one service replica if Workpiece must enforce one active project build globally.
 
 It accepts one original STL plus quantity/material/quality/strength and:
 
@@ -70,9 +70,9 @@ It accepts one original STL plus quantity/material/quality/strength and:
 3. asks OrcaSlicer to auto-orient, duplicate and auto-arrange the requested quantity,
 4. enables automatic supports in the effective process profile,
 5. exports an editable project `.3mf` **without slicing in the same Orca invocation**,
-6. opens that project in a fresh Orca process with no external profiles loaded,
-7. slices all plates to prove that the project carries enough embedded configuration to reopen and slice,
-8. returns the editable 3MF plus verification metadata.
+6. when `verify=true` (the default used by CI), opens that project in a fresh Orca process and slices all plates,
+7. when `verify=false` (the Workpiece live review path), stops after project export/inspection so the request performs only one Orca invocation,
+8. returns either the existing JSON/base64 test payload or, with `response_mode=binary`, the exact 3MF bytes plus compact validated metadata in response headers.
 
 The temporary machine matrix is:
 
@@ -84,18 +84,22 @@ Ender auto-routing currently supports PLA, PETG, ABS and TPU from Orca's bundled
 Example:
 
 ```bash
-curl -F file=@part.stl \
+curl -H "Authorization: Bearer $WORKPIECE_PROJECT_API_TOKEN" \
+  -F file=@part.stl \
   -F material=pla \
   -F quality=balanced \
   -F strength=functional \
   -F quantity=6 \
   -F printer=auto \
-  http://localhost:8080/v1/project
+  -F verify=false \
+  -F response_mode=binary \
+  http://localhost:8080/v1/project \
+  -o workpiece-production.3mf
 ```
 
-The JSON response includes the project as base64 only for this experiment. A later production checkpoint should replace that transport with Workpiece-owned object storage/binary artifact handoff.
+JSON/base64 remains available for regression testing. Binary mode does not construct the base64 payload; the production website streams the response into Workpiece-owned R2 storage with SHA-256 enforcement and validates the retained object metadata.
 
-Real OrcaSlicer 2.4.2 Docker acceptance now covers Ender quantity, RatRig routing, PCTG fallback, fresh-process reopen/slice, and a 12-instance / 3-plate project. A desktop Orca acceptance check also opened and sliced the generated RatRig project successfully. The endpoint remains experimental because production authentication, concurrency/resource controls, durable artifact storage, calibrated Ender profiles, and full manufacturing provenance are still pending.
+Real OrcaSlicer 2.4.2 Docker acceptance now covers Ender quantity, RatRig routing, PCTG fallback, fresh-process reopen/slice, and a 12-instance / 3-plate project. A desktop Orca acceptance check also opened and sliced the generated RatRig project successfully. Authentication, single-job concurrency control, binary handoff, profile hashes and website-owned durable artifact storage are staged in CP3. The temporary generic Ender profile remains the major machine-profile caveat, and desktop Orca inspection remains mandatory before printing.
 
 ## Publish to GitHub
 
@@ -116,6 +120,9 @@ ALLOWED_ORIGINS=https://workpiece.gr,https://www.workpiece.gr
 MAX_UPLOAD_BYTES=52428800
 SLICE_TIMEOUT_SECONDS=180
 MAX_PREVIEW_MOVES=30000
+ENABLE_EXPERIMENTAL_PROJECT_API=1
+WORKPIECE_PROJECT_API_TOKEN=<strong-random-server-to-server-secret>
+PROJECT_QUEUE_TIMEOUT_SECONDS=30
 ```
 
 4. Generate a public Railway domain and open `/health` on it.

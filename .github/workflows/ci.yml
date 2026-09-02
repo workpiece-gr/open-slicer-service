@@ -48,6 +48,8 @@ jobs:
             -e ALLOWED_ORIGINS=http://localhost:3000 \
             -e ORCA_DEBUG_LOGS=1 \
             -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
+            -e WORKPIECE_PROJECT_API_TOKEN=ci-project-token \
+            -e PROJECT_QUEUE_TIMEOUT_SECONDS=30 \
             workpiece-open-slicer:cp2b
 
       - name: Wait for health
@@ -95,6 +97,7 @@ jobs:
         run: |
           set +e
           curl --fail-with-body --max-time 240 \
+            -H "Authorization: Bearer ci-project-token" \
             -F file=@/tmp/workpiece-cube.stl \
             -F material=pla \
             -F quality=balanced \
@@ -147,6 +150,7 @@ jobs:
         run: |
           set -e
           curl --fail-with-body --max-time 300 \
+            -H "Authorization: Bearer ci-project-token" \
             -F file=@/tmp/workpiece-ratrig-only.stl \
             -F material=pla \
             -F quality=balanced \
@@ -156,6 +160,7 @@ jobs:
             http://127.0.0.1:8080/v1/project \
             -o /tmp/ratrig-project.json
           curl --fail-with-body --max-time 300 \
+            -H "Authorization: Bearer ci-project-token" \
             -F file=@/tmp/workpiece-cube.stl \
             -F material=pla \
             -F quality=balanced \
@@ -165,6 +170,7 @@ jobs:
             http://127.0.0.1:8080/v1/project \
             -o /tmp/ratrig-small-pla-project.json
           curl --fail-with-body --max-time 300 \
+            -H "Authorization: Bearer ci-project-token" \
             -F file=@/tmp/workpiece-cube.stl \
             -F material=pctg \
             -F quality=balanced \
@@ -204,6 +210,7 @@ jobs:
         run: |
           set +e
           curl --fail-with-body --max-time 300 \
+            -H "Authorization: Bearer ci-project-token" \
             -F file=@/tmp/workpiece-multiplate.stl \
             -F material=pla \
             -F quality=balanced \
@@ -237,6 +244,60 @@ jobs:
               "plates": payload["verification"]["plate_count"],
               "filament_g": payload["verification"]["total_filament_grams"],
           }, indent=2))
+          PY
+
+      - name: Verify production project mode skips the second Orca slice
+        run: |
+          set -e
+          status=$(curl --silent --output /tmp/project-unauthorized.bin --write-out "%{http_code}" \
+            -F file=@/tmp/workpiece-cube.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=1 \
+            -F printer=auto \
+            -F verify=false \
+            -F response_mode=binary \
+            http://127.0.0.1:8080/v1/project)
+          test "$status" = "401"
+          curl --fail-with-body --max-time 240 \
+            -H "Authorization: Bearer ci-project-token" \
+            -D /tmp/project-production-headers.txt \
+            -F file=@/tmp/workpiece-cube.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=1 \
+            -F printer=auto \
+            -F verify=false \
+            -F response_mode=binary \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/workpiece-production-mode.3mf
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          from pathlib import Path
+
+          headers = {}
+          for line in Path("/tmp/project-production-headers.txt").read_text(encoding="utf-8").splitlines():
+              if ":" in line:
+                  key, value = line.split(":", 1)
+                  headers[key.strip().lower()] = value.strip()
+          assert headers["content-type"].startswith("model/3mf")
+          metadata = json.loads(base64.urlsafe_b64decode(headers["x-workpiece-project-metadata"]).decode("utf-8"))
+          project = Path("/tmp/workpiece-production-mode.3mf").read_bytes()
+          assert metadata["request"]["verification_requested"] is False
+          assert metadata["request"]["response_mode"] == "binary"
+          assert metadata["verification"]["performed"] is False
+          assert metadata["verification"]["reopened_in_fresh_orca_process"] is False
+          assert metadata["project"]["inspection"]["instance_count"] == 1
+          assert metadata["project"]["inspection"]["embedded"]["project_settings"] is True
+          assert len(project) == metadata["project"]["bytes"]
+          assert hashlib.sha256(project).hexdigest() == metadata["project"]["sha256"]
+          assert headers["x-workpiece-project-sha256"] == metadata["project"]["sha256"]
+          for kind in ("machine", "process", "filament"):
+              assert len(metadata["profiles"][kind]["sha256"]) == 64
           PY
 
       - name: Upload generated project 3MF fixtures
