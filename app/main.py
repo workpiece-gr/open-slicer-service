@@ -54,7 +54,7 @@ MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
 ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
 ENABLE_EXPERIMENTAL_PROJECT_API = os.getenv("ENABLE_EXPERIMENTAL_PROJECT_API", "0").strip().lower() in {"1", "true", "yes"}
 WORKPIECE_PROJECT_API_TOKEN = os.getenv("WORKPIECE_PROJECT_API_TOKEN", "").strip()
-PROJECT_QUEUE_TIMEOUT_SECONDS = max(1, int(os.getenv("PROJECT_QUEUE_TIMEOUT_SECONDS", "300")))
+PROJECT_QUEUE_TIMEOUT_SECONDS = max(1, int(os.getenv("PROJECT_QUEUE_TIMEOUT_SECONDS", "30")))
 SERVICE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip() or os.getenv("SOURCE_COMMIT_SHA", "").strip()
 PROJECT_GENERATION_LOCK = threading.Lock()
 
@@ -207,6 +207,7 @@ def health() -> dict:
             "enabled": ENABLE_EXPERIMENTAL_PROJECT_API,
             "authenticated": bool(WORKPIECE_PROJECT_API_TOKEN),
             "concurrency": 1,
+            "concurrency_scope": "single service process; deploy one replica until a distributed queue exists",
             "queue_timeout_seconds": PROJECT_QUEUE_TIMEOUT_SECONDS,
             "ender_generic_profiles_ready": ender_generic_profiles_ready(),
             "printers": {key: {"label": value["label"], "envelope_mm": value["envelope_mm"], "temporary_generic": value["temporary_generic"]} for key, value in PROJECT_PRINTERS.items()},
@@ -762,7 +763,6 @@ async def build_project(
                 "media_type": "model/3mf",
                 "bytes": project_bytes,
                 "sha256": sha256_file(project_path),
-                "base64": base64.b64encode(project_path.read_bytes()).decode("ascii"),
                 "inspection": project_inspection,
                 "layout_repair": layout_repair,
             },
@@ -816,6 +816,7 @@ async def build_project(
                     "X-Workpiece-Project-Metadata": encoded_metadata,
                 },
             )
+        payload["project"]["base64"] = base64.b64encode(project_path.read_bytes()).decode("ascii")
         return payload
 
 
