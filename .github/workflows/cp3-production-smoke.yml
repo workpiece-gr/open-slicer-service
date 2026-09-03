@@ -1,0 +1,154 @@
+name: CP3 production smoke
+
+on:
+  push:
+    branches:
+      - chris/cp3-production-smoke-20260903
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BASE_URL: https://open-slicer-service-production.up.railway.app
+      PROJECT_TOKEN: ${{ secrets.WORKPIECE_PROJECT_API_TOKEN || secrets.WORKPIECE_FDM_SLICER_TOKEN || secrets.CP3_PROJECT_API_TOKEN }}
+
+    steps:
+      - name: Generate benign STL fixture
+        run: |
+          python - <<'PY'
+          import struct
+          from pathlib import Path
+
+          faces = [
+              (0,2,1),(0,3,2),(4,5,6),(4,6,7),
+              (0,1,5),(0,5,4),(1,2,6),(1,6,5),
+              (2,3,7),(2,7,6),(3,0,4),(3,4,7),
+          ]
+          vertices = [
+              (0,0,0),(20,0,0),(20,20,0),(0,20,0),
+              (0,0,20),(20,0,20),(20,20,20),(0,20,20),
+          ]
+          with Path("/tmp/workpiece-smoke-cube.stl").open("wb") as handle:
+              handle.write(b"Workpiece CP3 production smoke".ljust(80, b"\0"))
+              handle.write(struct.pack("<I", len(faces)))
+              for face in faces:
+                  points = [vertices[index] for index in face]
+                  handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
+          PY
+
+      - name: Verify production health and project configuration
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 30 "${BASE_URL}/health" -o /tmp/health.json
+          python - <<'PY'
+          import json
+          h=json.load(open("/tmp/health.json",encoding="utf-8"))
+          assert h.get("ok") is True, h
+          assert h.get("engine") == "OrcaSlicer 2.4.2", h
+          p=h.get("project_3mf") or {}
+          assert p.get("experimental") is True, p
+          assert p.get("enabled") is True, p
+          assert p.get("authenticated") is True, p
+          assert p.get("concurrency") == 1, p
+          assert p.get("queue_timeout_seconds") == 30, p
+          assert p.get("ender_generic_profiles_ready") is True, p
+          print("health=ok")
+          print("engine="+str(h.get("engine")))
+          print("project_enabled=true")
+          print("project_authenticated=true")
+          print("per_process_concurrency=1")
+          print("queue_timeout_seconds=30")
+          PY
+
+      - name: Verify project endpoint rejects unauthenticated requests
+        run: |
+          set -euo pipefail
+          status="$(curl --silent --show-error --max-time 30             --output /tmp/unauthorized.json             --write-out "%{http_code}"             -F file=@/tmp/workpiece-smoke-cube.stl             -F material=pla             -F quality=balanced             -F strength=functional             -F quantity=1             -F printer=auto             -F verify=false             -F response_mode=binary             "${BASE_URL}/v1/project")"
+          test "${status}" = "401"
+          echo "unauthenticated_project_status=${status}"
+
+      - name: Verify existing public slice preview remains healthy
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error --max-time 240             -F file=@/tmp/workpiece-smoke-cube.stl             -F material=pla             -F quality=balanced             -F strength=functional             -F printer=ratrig_vcore3_300             -F preoriented=true             "${BASE_URL}/v1/slice"             -o /tmp/slice.json
+          python - <<'PY'
+          import json
+          p=json.load(open("/tmp/slice.json",encoding="utf-8"))
+          assert (p.get("engine") or {}).get("name") == "OrcaSlicer", p
+          assert (p.get("request") or {}).get("printer") == "ratrig_vcore3_300", p
+          assert (p.get("summary") or {}).get("filament_grams", 0) > 0, p
+          assert p.get("gcode_sha256"), p
+          print("public_slice_preview=ok")
+          PY
+
+      - name: Verify authenticated one-pass binary project when a smoke secret is available
+        id: authenticated
+        run: |
+          set -euo pipefail
+          if [ -z "${PROJECT_TOKEN:-}" ]; then
+            echo "authenticated_smoke=not_run_no_github_secret"
+            echo "ran=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          curl --fail-with-body --silent --show-error --max-time 240             -H "Authorization: Bearer ${PROJECT_TOKEN}"             -D /tmp/project-headers.txt             -F file=@/tmp/workpiece-smoke-cube.stl             -F material=pla             -F quality=balanced             -F strength=functional             -F quantity=1             -F printer=auto             -F verify=false             -F response_mode=binary             "${BASE_URL}/v1/project"             -o /tmp/workpiece-production-smoke.3mf
+
+          python - <<'PY'
+          import base64, hashlib, json, zipfile
+          from pathlib import Path
+
+          headers={}
+          for line in Path("/tmp/project-headers.txt").read_text(encoding="utf-8",errors="replace").splitlines():
+              if ":" in line:
+                  k,v=line.split(":",1)
+                  headers[k.strip().lower()]=v.strip()
+
+          content_type=headers.get("content-type","").lower()
+          assert content_type.startswith("model/3mf"), content_type
+
+          raw=headers.get("x-workpiece-project-metadata","")
+          pad="="*((4-len(raw)%4)%4)
+          metadata=json.loads(base64.urlsafe_b64decode(raw+pad).decode("utf-8"))
+          body=Path("/tmp/workpiece-production-smoke.3mf").read_bytes()
+          sha=hashlib.sha256(body).hexdigest()
+
+          assert headers.get("x-workpiece-project-sha256") == sha
+          assert (metadata.get("project") or {}).get("sha256") == sha
+          assert (metadata.get("request") or {}).get("verification_requested") is False
+          assert (metadata.get("request") or {}).get("response_mode") == "binary"
+          assert (metadata.get("verification") or {}).get("performed") is False
+          assert (metadata.get("source") or {}).get("sha256")
+          assert (metadata.get("engine") or {}).get("version") == "2.4.2"
+          assert (metadata.get("project") or {}).get("inspection",{}).get("instance_count") == 1
+          for kind in ("machine","process","filament"):
+              assert len(((metadata.get("profiles") or {}).get(kind) or {}).get("sha256","")) == 64
+
+          with zipfile.ZipFile("/tmp/workpiece-production-smoke.3mf") as archive:
+              names=set(archive.namelist())
+              assert "3D/3dmodel.model" in names
+              assert "Metadata/project_settings.config" in names
+
+          commit=(metadata.get("engine") or {}).get("service_commit")
+          print("authenticated_project=ok")
+          print("project_zip=ok")
+          print("project_sha256=verified")
+          print("service_commit="+str(commit or "not_reported"))
+          PY
+          echo "ran=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Summarize smoke result
+        if: always()
+        run: |
+          {
+            echo "## CP3 production smoke"
+            echo
+            echo "- Health/configuration step: ${{ steps.authenticated.outcome != 'cancelled' && 'executed' || 'cancelled' }}"
+            echo "- Authenticated project smoke executed: ${{ steps.authenticated.outputs.ran || 'false' }}"
+            echo "- Target: production Railway slicer"
+            echo "- Source branch only; no deployment or production configuration changed."
+          } >> "${GITHUB_STEP_SUMMARY}"
