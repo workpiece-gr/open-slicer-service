@@ -45,6 +45,7 @@ jobs:
         run: |
           docker run -d --name workpiece-slicer -p 8080:8080 \
             -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
             -e ALLOWED_ORIGINS=http://localhost:3000 \
             -e ORCA_DEBUG_LOGS=1 \
             -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
@@ -246,6 +247,90 @@ jobs:
           }, indent=2))
           PY
 
+      - name: Reopen exact retained multi-plate 3MF through FDM v2 CP2
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.load(open("/tmp/multiplate-project.json", encoding="utf-8"))
+          assert payload["engine"]["service_commit"] and len(payload["engine"]["service_commit"]) == 40
+          receipt = {
+              "source": {"sha256": payload["source"]["sha256"]},
+              "printer": {
+                  "key": payload["printer"]["key"],
+                  "temporary_generic": payload["printer"]["temporary_generic"],
+              },
+              "profiles": payload["profiles"],
+              "engine": payload["engine"],
+              "project": {"sha256": payload["project"]["sha256"]},
+          }
+          Path("/tmp/cp2-generation-receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+          PY
+          docker cp /tmp/workpiece-multiplate-project.3mf workpiece-slicer:/tmp/cp2-production.3mf
+          docker cp /tmp/cp2-generation-receipt.json workpiece-slicer:/tmp/cp2-generation-receipt.json
+          docker exec -i workpiece-slicer python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_exact_gcode import execute_exact_project_gcode
+
+          receipt = json.loads(Path("/tmp/cp2-generation-receipt.json").read_text(encoding="utf-8"))
+          result = execute_exact_project_gcode(
+              orca_bin=Path(os.environ["ORCA_BIN"]),
+              project_path=Path("/tmp/cp2-production.3mf"),
+              output_dir=Path("/tmp/cp2-exact-gcode"),
+              timeout_seconds=300,
+              generation_receipt=receipt,
+              base_env=os.environ,
+          )
+          serializable = {
+              **{key: value for key, value in result.items() if key != "plates"},
+              "plates": [
+                  {key: value for key, value in plate.items() if key != "bytes"}
+                  for plate in result["plates"]
+              ],
+          }
+          Path("/tmp/cp2-result.json").write_text(json.dumps(serializable, indent=2), encoding="utf-8")
+          PY
+          docker cp workpiece-slicer:/tmp/cp2-result.json /tmp/cp2-result.json
+          docker cp workpiece-slicer:/tmp/cp2-exact-gcode /tmp/cp2-exact-gcode
+          python - <<'PY'
+          import hashlib
+          import json
+          import re
+          from pathlib import Path
+
+          source = json.load(open("/tmp/multiplate-project.json", encoding="utf-8"))
+          result = json.load(open("/tmp/cp2-result.json", encoding="utf-8"))
+          expected = sorted(int(plate["plater_id"]) for plate in source["project"]["inspection"]["plates"])
+          assert len(expected) > 1
+          assert result["authority_state"] == "evidence_candidate"
+          assert result["reopened_exact_project"] is True
+          assert result["fresh_runtime_state"] is True
+          assert result["project_sha256"] == source["project"]["sha256"]
+          assert result["plate_ids"] == expected
+          assert [plate["plate_id"] for plate in result["plates"]] == expected
+          assert result["generation_receipt"]["printer"]["temporary_generic"] is True
+          for plate in result["plates"]:
+              match = re.fullmatch(r"plate_([1-9][0-9]*)\.gcode", plate["filename"])
+              assert match and int(match.group(1)) == plate["plate_id"]
+              retained = Path("/tmp/cp2-exact-gcode") / plate["filename"]
+              payload = retained.read_bytes()
+              assert payload and len(payload) == plate["byte_count"]
+              assert hashlib.sha256(payload).hexdigest() == plate["sha256"]
+              assert plate["project_sha256"] == source["project"]["sha256"]
+              assert plate["source_sha256"] == source["source"]["sha256"]
+              assert plate["printer_key"] == source["printer"]["key"]
+              assert plate["profile_sha256"] == {
+                  kind: source["profiles"][kind]["sha256"]
+                  for kind in ("machine", "process", "filament")
+              }
+              assert plate["orca_version"] == source["engine"]["version"]
+              assert plate["service_commit"] == source["engine"]["service_commit"]
+          PY
+
       - name: Verify production project mode skips the second Orca slice
         run: |
           set -e
@@ -308,6 +393,16 @@ jobs:
             /tmp/workpiece-ender-project.3mf
             /tmp/workpiece-ratrig-project.3mf
             /tmp/workpiece-multiplate-project.3mf
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload CP2 exact G-code evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp2-exact-gcode
+          path: |
+            /tmp/cp2-result.json
+            /tmp/cp2-exact-gcode/*.gcode
           if-no-files-found: error
           retention-days: 7
 
