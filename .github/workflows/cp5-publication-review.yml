@@ -1,0 +1,140 @@
+name: FDM v2 CP5 publication review packet
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile.toolchain"
+      - "Dockerfile.authority"
+      - "fdm-toolchain.lock.json"
+      - "app/fdm_toolchain_provenance.py"
+      - "app/fdm_toolchain_publication_review.py"
+      - "tests/test_fdm_toolchain_provenance.py"
+      - "tests/test_fdm_toolchain_publication_review.py"
+      - ".github/workflows/cp5-publication-review.yml"
+      - "requirements.txt"
+      - "app/**"
+      - "profiles/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile.toolchain"
+      - "Dockerfile.authority"
+      - "fdm-toolchain.lock.json"
+      - "app/fdm_toolchain_provenance.py"
+      - "app/fdm_toolchain_publication_review.py"
+      - "tests/test_fdm_toolchain_provenance.py"
+      - "tests/test_fdm_toolchain_publication_review.py"
+      - ".github/workflows/cp5-publication-review.yml"
+      - "requirements.txt"
+      - "app/**"
+      - "profiles/**"
+  workflow_dispatch:
+
+# Deliberately read-only. This workflow must never authenticate to GHCR or push
+# an image. It prepares review evidence only; publication remains a separate,
+# explicitly approved operator action.
+permissions:
+  contents: read
+
+jobs:
+  build-review-packet:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+
+      - name: Run CP5 publication-review unit tests
+        run: python -m pytest -q tests/test_fdm_toolchain_provenance.py tests/test_fdm_toolchain_publication_review.py
+
+      - name: Build unpublished toolchain candidate
+        run: docker build -f Dockerfile.toolchain -t workpiece-fdm-toolchain:publication-review .
+
+      - name: Extract exact candidate evidence
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cp5-publication-review
+          container_id=$(docker create workpiece-fdm-toolchain:publication-review)
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/opt/workpiece-toolchain/manifest.json" /tmp/cp5-publication-review/toolchain-manifest.json
+          docker cp "$container_id:/opt/workpiece-toolchain/packages.txt" /tmp/cp5-publication-review/packages.txt
+          docker cp "$container_id:/opt/orca/squashfs-root/AppRun" /tmp/cp5-publication-review/orca-AppRun
+          docker rm "$container_id"
+          trap - EXIT
+
+          docker image inspect --format '{{.Id}}' workpiece-fdm-toolchain:publication-review \
+            | tee /tmp/cp5-publication-review/toolchain-local-image-id.txt
+          test "$(docker image inspect --format '{{.Architecture}}' workpiece-fdm-toolchain:publication-review)" = "amd64"
+
+      - name: Build parallel authority service candidate
+        run: |
+          docker build \
+            -f Dockerfile.authority \
+            --build-arg TOOLCHAIN_IMAGE=workpiece-fdm-toolchain:publication-review \
+            -t workpiece-fdm-authority:publication-review \
+            .
+          docker image inspect --format '{{.Id}}' workpiece-fdm-authority:publication-review \
+            | tee /tmp/cp5-publication-review/service-local-image-id.txt
+          test "$(docker image inspect --format '{{.Architecture}}' workpiece-fdm-authority:publication-review)" = "amd64"
+
+      - name: Generate deterministic non-publishing review packet
+        env:
+          SOURCE_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_toolchain_publication_review import build_toolchain_publication_review_packet
+
+          packet = build_toolchain_publication_review_packet(
+              lock_bytes=Path('fdm-toolchain.lock.json').read_bytes(),
+              manifest_bytes=Path('/tmp/cp5-publication-review/toolchain-manifest.json').read_bytes(),
+              package_inventory_bytes=Path('/tmp/cp5-publication-review/packages.txt').read_bytes(),
+              orca_runtime_bytes=Path('/tmp/cp5-publication-review/orca-AppRun').read_bytes(),
+              toolchain_recipe_bytes=Path('Dockerfile.toolchain').read_bytes(),
+              service_recipe_bytes=Path('Dockerfile.authority').read_bytes(),
+              service_commit=os.environ['SOURCE_COMMIT_SHA'],
+              toolchain_local_image_id=Path('/tmp/cp5-publication-review/toolchain-local-image-id.txt').read_text(encoding='utf-8'),
+              service_local_image_id=Path('/tmp/cp5-publication-review/service-local-image-id.txt').read_text(encoding='utf-8'),
+          )
+          assert packet['authorityState'] == 'publication_review_candidate'
+          assert packet['authorityCriticalComplete'] is False
+          assert packet['publication']['performed'] is False
+          assert packet['publication']['registryDigest'] is None
+          assert packet['publication']['explicitApprovalRequired'] is True
+          assert packet['production']['productionAuthorityEligible'] is False
+          assert packet['production']['productionEnablementPerformed'] is False
+          assert packet['retainedCandidateEvidence']['localImageIdsAreRegistryDigests'] is False
+          Path('/tmp/cp5-publication-review/publication-review-packet.json').write_text(
+              json.dumps(packet, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+      - name: Prove workflow has no registry publication path
+        run: |
+          set -euo pipefail
+          test "$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          value = json.loads(Path('fdm-toolchain.lock.json').read_text(encoding='utf-8'))
+          print(value['status'])
+          PY
+          )" = "unpublished"
+          ! grep -Eq 'packages:[[:space:]]*write|docker[[:space:]]+login|docker[[:space:]]+push|buildx[^\n]*--push' .github/workflows/cp5-publication-review.yml
+
+      - name: Upload publication-review evidence only
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp5-publication-review-packet
+          path: |
+            /tmp/cp5-publication-review/publication-review-packet.json
+            /tmp/cp5-publication-review/toolchain-manifest.json
+            /tmp/cp5-publication-review/packages.txt
+            /tmp/cp5-publication-review/toolchain-local-image-id.txt
+            /tmp/cp5-publication-review/service-local-image-id.txt
+          if-no-files-found: error
+          retention-days: 14
