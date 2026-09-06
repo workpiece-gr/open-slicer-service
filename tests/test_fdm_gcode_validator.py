@@ -105,6 +105,7 @@ def test_independent_validator_passes_exact_profile_bound_gcode():
     assert result["temperatures"]["nozzleTargetsC"] == [220.0, 220.0]
     assert result["temperatures"]["bedTargetsC"] == [60.0]
     assert result["observedMacros"] == ["END_PRINT", "START_PRINT", "TIMELAPSE_TAKE_FRAME"]
+    assert {"G21", "G90", "M83", "START_PRINT", "G1", "TIMELAPSE_TAKE_FRAME", "G92", "END_PRINT"} <= set(result["observedCommands"])
 
 
 def test_gcode_bytes_must_match_cp2_sha_receipt():
@@ -175,6 +176,13 @@ def test_unapproved_macro_fails_closed():
     result = validate(good_gcode().replace(b"TIMELAPSE_TAKE_FRAME", b"SOME_OTHER_MACRO"))
     assert result["passed"] is False
     assert "unapproved_macro" in issue_codes(result)
+
+
+def test_unknown_numeric_m_command_fails_closed():
+    result = validate(good_gcode().replace(b"END_PRINT", b"M73 P50\nEND_PRINT"))
+    assert result["passed"] is False
+    assert "unsupported_m_command" in issue_codes(result)
+    assert "M73" in result["observedCommands"]
 
 
 def test_profile_temperature_policy_is_enforced_without_invented_limits():
