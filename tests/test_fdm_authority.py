@@ -59,7 +59,20 @@ def valid_manifest() -> dict:
         "source": {"filename": "source-original.stl", "bytes": 1000, "sha256": SHA["source"], "immutable": True},
         "machine": {
             "key": "ratrig_vcore3_300",
-            "qualification": {"productionReady": True, "evidenceId": "ratrig-production-profile-v1"},
+            "qualification": {
+                "contractVersion": "fdm-machine-qualification/1.0.0",
+                "productionReady": True,
+                "qualificationId": "ratrig-production-profile-v1",
+                "evidenceId": "ratrig-production-profile-v1",
+                "protocolId": "workpiece-ratrig-qualification-v1",
+                "printerKey": "ratrig_vcore3_300",
+                "request": {"material": "pla", "quality": "balanced", "strength": "functional"},
+                "profileSha256": dict(PROFILE_HASHES),
+                "receiptSha256": "a" * 64,
+                "receiptBytes": 512,
+                "evidence": {"filename": "qualification-evidence.pdf", "mediaType": "application/pdf", "bytes": 1024, "sha256": "b" * 64},
+                "review": {"status": "approved", "reviewerId": "workpiece-reviewer", "completedAt": "2026-09-06T00:00:00Z"},
+            },
         },
         "profiles": {
             "machine": {"identity": "ratrig_vcore3_300:machine", "sha256": SHA["machine"]},

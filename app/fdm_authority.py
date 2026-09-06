@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .fdm_instance_plate_evidence import INSTANCE_PLATE_EVIDENCE_VERSION
+from .fdm_machine_qualification import FDM_MACHINE_QUALIFICATION_CONTRACT_VERSION
 from .fdm_toolchain_provenance import FDM_TOOLCHAIN_LOCK_SCHEMA, FDM_TOOLCHAIN_PROVENANCE_VERSION
 
 FDM_JOB_CONTRACT_VERSION = "fdm-job/2.0.0"
@@ -356,8 +357,38 @@ def evaluate_fdm_authority(value: Mapping[str, Any] | Any) -> AuthorityEvaluatio
         if _text(_record(profiles.get(kind)).get("identity")) != expected:
             _issue(issues, "profile_configuration_mismatch", f"profiles.{kind}.identity", "Profile identity does not match selected machine and requested configuration.")
     qualification = _record(machine.get("qualification"))
-    if qualification.get("productionReady") is not True or not _text(qualification.get("evidenceId")):
-        _issue(issues, "machine_not_production_ready", "machine.qualification", "Physical machine/profile qualification must explicitly be production-ready and evidence-backed.")
+    qualification_request = _record(qualification.get("request"))
+    qualification_profiles = _record(qualification.get("profileSha256"))
+    qualification_evidence = _record(qualification.get("evidence"))
+    qualification_review = _record(qualification.get("review"))
+    qualification_valid = (
+        qualification.get("productionReady") is True
+        and qualification.get("contractVersion") == FDM_MACHINE_QUALIFICATION_CONTRACT_VERSION
+        and bool(_text(qualification.get("qualificationId")))
+        and _text(qualification.get("evidenceId")) == _text(qualification.get("qualificationId"))
+        and bool(_text(qualification.get("protocolId")))
+        and _text(qualification.get("printerKey")) == machine_key
+        and _sha(qualification.get("receiptSha256")) != ""
+        and _pos_int(qualification.get("receiptBytes")) is not None
+        and _text(qualification_request.get("material")).lower() == material
+        and _text(qualification_request.get("quality")).lower() == quality
+        and _text(qualification_request.get("strength")).lower() == strength
+        and all(profile_hashes.get(kind) and _sha(qualification_profiles.get(kind)) == profile_hashes[kind] for kind in _PROFILE_KINDS)
+        and bool(_text(qualification_evidence.get("filename")))
+        and bool(_text(qualification_evidence.get("mediaType")))
+        and _pos_int(qualification_evidence.get("bytes")) is not None
+        and _sha(qualification_evidence.get("sha256")) != ""
+        and _text(qualification_review.get("status")).lower() == "approved"
+        and bool(_text(qualification_review.get("reviewerId")))
+        and bool(_text(qualification_review.get("completedAt")))
+    )
+    if not qualification_valid:
+        _issue(
+            issues,
+            "machine_not_production_ready",
+            "machine.qualification",
+            "Physical machine/profile qualification must be backed by an immutable approved receipt bound to the exact request/profile hashes and retained physical evidence.",
+        )
 
     project = _record(manifest.get("project"))
     project_sha = _sha(project.get("sha256"))
