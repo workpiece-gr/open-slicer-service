@@ -103,6 +103,7 @@ def test_generation_receipt_binds_project_source_profiles_and_service(tmp_path: 
     normalized = normalize_generation_receipt(receipt, project_sha256=receipt["project"]["sha256"])
     assert normalized["source"]["sha256"] == "1" * 64
     assert normalized["printer"]["key"] == "ratrig_vcore3_300"
+    assert normalized["printer"]["temporary_generic"] is False
     assert normalized["profiles"]["machine"]["sha256"] == "2" * 64
     assert normalized["engine"]["version"] == "2.4.2"
 
@@ -110,6 +111,16 @@ def test_generation_receipt_binds_project_source_profiles_and_service(tmp_path: 
     bad["project"]["sha256"] = "f" * 64
     with pytest.raises(ValueError, match="does not match the retained production 3MF"):
         normalize_generation_receipt(bad, project_sha256=receipt["project"]["sha256"])
+
+    missing_qualification_flag = generation_receipt(project)
+    del missing_qualification_flag["printer"]["temporary_generic"]
+    with pytest.raises(ValueError, match="must explicitly state the temporary-generic printer flag"):
+        normalize_generation_receipt(missing_qualification_flag, project_sha256=receipt["project"]["sha256"])
+
+    mismatched_profile = generation_receipt(project)
+    mismatched_profile["profiles"]["machine"]["identity"] = "other_machine:machine"
+    with pytest.raises(ValueError, match="machine profile identity does not match"):
+        normalize_generation_receipt(mismatched_profile, project_sha256=receipt["project"]["sha256"])
 
 
 def test_execute_exact_project_uses_only_retained_3mf_and_retains_hashed_bytes(tmp_path: Path, monkeypatch):
@@ -148,7 +159,9 @@ def test_execute_exact_project_uses_only_retained_3mf_and_retains_hashed_bytes(t
     assert "--load-settings" not in captured["command"]
     assert "--load-filaments" not in captured["command"]
     assert captured["cwd"] == project.parent
-    assert captured["env"]["XDG_CONFIG_HOME"] == str(output / ".xdg" / "config")
+    fresh_root = output.with_name(f"{output.name}.xdg")
+    assert captured["env"]["XDG_CONFIG_HOME"] == str(fresh_root / "config")
+    assert not (output / ".xdg").exists()
     assert result["authority_state"] == "evidence_candidate"
     assert result["reopened_exact_project"] is True
     assert result["fresh_runtime_state"] is True
@@ -255,10 +268,9 @@ def test_collect_exact_gcode_fails_closed_on_noncanonical_filename(tmp_path: Pat
         )
 
 
-def test_collect_exact_gcode_fails_closed_on_duplicate_plate_output(tmp_path: Path):
-    write_gcode(tmp_path / "a", "plate_1.gcode", b"first")
-    write_gcode(tmp_path / "b", "plate_1.gcode", b"second")
-    with pytest.raises(ValueError, match="more than one G-code artifact"):
+def test_collect_exact_gcode_rejects_nested_output(tmp_path: Path):
+    write_gcode(tmp_path / "nested", "plate_1.gcode", b"nested")
+    with pytest.raises(ValueError, match="outside the exact output directory root"):
         collect_exact_gcode_artifacts(
             tmp_path,
             project_inspection=inspection(1),

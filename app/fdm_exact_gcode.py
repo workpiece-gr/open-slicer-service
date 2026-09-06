@@ -83,6 +83,7 @@ def normalize_generation_receipt(receipt_value: Mapping[str, Any] | Any, *, proj
 
     source_sha = _sha256(source.get("sha256"))
     printer_key = _text(printer.get("key"))
+    temporary_generic = printer.get("temporary_generic")
     engine_name = _text(engine.get("name"))
     engine_version = _text(engine.get("version"))
     service_commit = _text(engine.get("service_commit")).lower()
@@ -92,6 +93,8 @@ def normalize_generation_receipt(receipt_value: Mapping[str, Any] | Any, *, proj
         raise ValueError("The exact-project generation receipt is missing the immutable source SHA-256.")
     if not printer_key:
         raise ValueError("The exact-project generation receipt is missing the selected printer key.")
+    if not isinstance(temporary_generic, bool):
+        raise ValueError("The exact-project generation receipt must explicitly state the temporary-generic printer flag.")
     if engine_name != "OrcaSlicer" or not engine_version or not _COMMIT_RE.fullmatch(service_commit):
         raise ValueError("The exact-project generation receipt has incomplete Orca/service provenance.")
     if not receipt_project_sha or receipt_project_sha != project_sha256:
@@ -106,11 +109,18 @@ def normalize_generation_receipt(receipt_value: Mapping[str, Any] | Any, *, proj
             raise ValueError(f"The exact-project generation receipt is missing the {kind} profile identity or SHA-256.")
         normalized_profiles[kind] = {"identity": identity, "sha256": digest}
 
+    if normalized_profiles["machine"]["identity"] != f"{printer_key}:machine":
+        raise ValueError("The machine profile identity does not match the selected printer in the generation receipt.")
+    for kind in ("process", "filament"):
+        identity = normalized_profiles[kind]["identity"]
+        if not identity.startswith(f"{printer_key}:") or not identity.endswith(f":{kind}"):
+            raise ValueError(f"The {kind} profile identity does not match the selected printer in the generation receipt.")
+
     return {
         "source": {"sha256": source_sha},
         "printer": {
             "key": printer_key,
-            "temporary_generic": printer.get("temporary_generic") is True,
+            "temporary_generic": temporary_generic,
         },
         "profiles": normalized_profiles,
         "engine": {
@@ -174,7 +184,10 @@ def collect_exact_gcode_artifacts(
         raise ValueError("The retained production 3MF SHA-256 is invalid.")
 
     expected = set(project_plate_ids(project_inspection))
-    discovered = sorted(output_dir.rglob("*.gcode"), key=lambda path: (path.name, str(path)))
+    nested = [path for path in output_dir.rglob("*.gcode") if path.parent != output_dir]
+    if nested:
+        raise ValueError("Fresh-Orca slicing emitted a G-code artifact outside the exact output directory root.")
+    discovered = sorted(output_dir.glob("*.gcode"), key=lambda path: path.name)
     if not discovered:
         raise ValueError("Fresh-Orca slicing produced no G-code artifacts.")
 
@@ -244,7 +257,7 @@ def execute_exact_project_gcode(
     project_sha256 = _sha256_file(project_path)
     provenance = normalize_generation_receipt(generation_receipt, project_sha256=project_sha256)
 
-    xdg_root = output_dir / ".xdg"
+    xdg_root = output_dir.with_name(f"{output_dir.name}.xdg")
     env = fresh_orca_env(base_env or os.environ, xdg_root)
     command = verify_project_command(
         orca_bin=orca_bin,
