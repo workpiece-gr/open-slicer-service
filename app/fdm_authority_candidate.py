@@ -8,6 +8,7 @@ an exact expected blocker set. It never grants production or fulfilment.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -40,6 +41,25 @@ def _request(generation_receipt: Mapping[str, Any]) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError("Authority v2 generation receipt must retain the exact manufacturing request.")
     return value
+
+
+def _verify_candidate_profile_bytes(
+    generation_receipt: Mapping[str, Any],
+    profile_bytes: Mapping[str, bytes],
+) -> None:
+    receipts = generation_receipt.get("profiles")
+    if not isinstance(receipts, Mapping):
+        raise ValueError("Authority v2 generation receipt lacks exact profile receipts.")
+    for kind in ("machine", "process", "filament"):
+        payload = profile_bytes.get(kind)
+        receipt = receipts.get(kind)
+        if not isinstance(payload, bytes) or not payload:
+            raise ValueError(f"Authority v2 requires exact non-empty {kind} profile bytes.")
+        if not isinstance(receipt, Mapping):
+            raise ValueError(f"Authority v2 generation receipt lacks the exact {kind} profile receipt.")
+        expected = str(receipt.get("sha256") or "").strip().lower()
+        if hashlib.sha256(payload).hexdigest() != expected:
+            raise ValueError(f"Exact {kind} profile bytes do not match the project generation receipt.")
 
 
 def build_fdm_authority_candidate(
@@ -94,6 +114,13 @@ def build_fdm_authority_candidate(
     if not material or not quality or not strength:
         raise ValueError("Authority v2 generation receipt lacks material, quality, or strength.")
 
+    profile_bytes = {
+        "machine": machine_profile_bytes,
+        "process": process_profile_bytes,
+        "filament": filament_profile_bytes,
+    }
+    _verify_candidate_profile_bytes(generation_receipt, profile_bytes)
+
     toolchain = build_toolchain_provenance(
         lock_bytes=toolchain_lock_bytes,
         manifest_bytes=toolchain_manifest_bytes,
@@ -113,11 +140,7 @@ def build_fdm_authority_candidate(
             source_filename=source_path.name,
             project_path=project_path,
             generation_receipt=generation_receipt,
-            profile_bytes={
-                "machine": machine_profile_bytes,
-                "process": process_profile_bytes,
-                "filament": filament_profile_bytes,
-            },
+            profile_bytes=profile_bytes,
             toolchain_receipt=toolchain,
             toolchain_lock_bytes=toolchain_lock_bytes,
             toolchain_manifest_bytes=toolchain_manifest_bytes,
