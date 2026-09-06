@@ -22,6 +22,28 @@ def _record(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def fresh_orca_env(base_env: Mapping[str, str], xdg_root: Path) -> dict[str, str]:
+    """Create a clean XDG root for the exact-project downstream Orca process.
+
+    The caller must provide a root that does not already contain state.  Existing
+    generation-process XDG variables in ``base_env`` are deliberately replaced.
+    """
+
+    if xdg_root.exists() and any(xdg_root.iterdir()):
+        raise ValueError("The downstream Orca XDG root must be empty before exact-project slicing.")
+    config = xdg_root / "config"
+    cache = xdg_root / "cache"
+    data = xdg_root / "data"
+    for directory in (config, cache, data):
+        directory.mkdir(parents=True, exist_ok=True)
+    return {
+        **dict(base_env),
+        "XDG_CONFIG_HOME": str(config),
+        "XDG_CACHE_HOME": str(cache),
+        "XDG_DATA_HOME": str(data),
+    }
+
+
 def project_plate_ids(project_inspection: Mapping[str, Any] | Any) -> tuple[int, ...]:
     """Return the exact non-empty physical plate ids recorded in the 3MF.
 
