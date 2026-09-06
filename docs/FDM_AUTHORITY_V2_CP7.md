@@ -13,13 +13,15 @@ CP7 does not call OrcaSlicer itself. It consumes an already reconciled productio
 `app/fdm_pricing.py` returns a deterministic `fdm-pricing/1.0.0` receipt with:
 
 - `priceAuthoritative: true`;
+- pricing-engine name/version and the exact 40-hex service commit that executed the pricing code;
 - the server pricing policy version and SHA-256;
-- exact source/project/profile/G-code evidence bindings;
+- exact source/project/machine/toolchain/profile/G-code evidence bindings;
 - exact filament mass and print time used for pricing;
 - exact support-use evidence from the retained G-code;
 - quantity and quantity-discount factor;
 - a cents-level commercial breakdown;
 - the authoritative FDM item subtotal before the cart-level minimum;
+- the current human-review requirement/status;
 - a deterministic pricing-receipt SHA-256.
 
 Commercial authority remains separate from technical production authority. A price may be authoritative while a job remains `evidence_candidate` only when the unresolved production blockers are the separately controlled:
@@ -28,6 +30,8 @@ Commercial authority remains separate from technical production authority. A pri
 - physical machine/profile qualification gate.
 
 Any source, project, profile, G-code, validator, plate membership, quantity, or statistics failure blocks authoritative pricing.
+
+CP7 **never grants production permission**. The receipt exposes whether technical production authority exists, but it always records `productionOrderEligible: false` and `productionEnablementPerformed: false`. Human workshop review remains the separate downstream safety gate that can authorize fulfilment only after all applicable production requirements are satisfied.
 
 ## Exact statistics rule
 
@@ -61,7 +65,7 @@ The receipt records support plate IDs, support extrusion-segment count, observed
 The dedicated CP7 integration workflow proves both sides with real OrcaSlicer 2.4.2 artifacts:
 
 - a support-free model sliced with automatic supports enabled must price with `support.used=false`;
-- a support-forcing overhang fixture must contain real support extrusion and price with `support.used=true`.
+- a support-forcing three-axis overhang fixture must contain real support extrusion and price with `support.used=true`.
 
 ## Commercial policy baseline
 
@@ -103,13 +107,13 @@ CP7 therefore returns:
 
 Checkout remains responsible for applying any cart-level minimum after combining eligible line items.
 
-## Rounding and determinism
+## Rounding, provenance, and determinism
 
 Commercial calculations use Python `Decimal`. Intermediate values are not rounded to cents. The final positive item price is rounded half-up to integer euro cents, matching the current positive-price `Math.round` behavior in the browser model.
 
-The pricing policy is canonical-JSON hashed. The final receipt is also canonical-JSON hashed after all evidence and commercial fields have been assembled.
+The pricing policy is canonical-JSON hashed. The receipt also binds the exact pricing-engine service commit. The final receipt is canonical-JSON hashed after all evidence, provenance, review, and commercial fields have been assembled.
 
-Identical manufacturing evidence and policy therefore produce an identical pricing receipt.
+Identical manufacturing evidence, policy, and pricing implementation therefore produce an identical pricing receipt.
 
 ## CP7 does not
 
@@ -123,6 +127,7 @@ CP7 does **not**:
 - promote the temporary generic Ender profile;
 - apply the €20 cart minimum per item;
 - use the browser `complexity` heuristic as authority;
+- grant production/fulfilment permission;
 - bypass human workshop review;
 - change approval, checkout, download, or workshop behavior;
 - change resin authority or resin physical readiness.
