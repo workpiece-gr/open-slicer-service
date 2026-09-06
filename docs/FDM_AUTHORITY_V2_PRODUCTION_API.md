@@ -63,6 +63,13 @@ Current production qualification configuration:
 - `FDM_MACHINE_QUALIFICATION_EVIDENCE` — path to the exact physical-evidence
   artifact referenced by the receipt.
 
+One configured receipt qualifies only the exact material/quality/strength and
+machine/process/filament profile hashes recorded in that receipt. A request for
+a different profile combination must fail closed until that combination has its
+own genuine qualification evidence. A future multi-profile qualification catalog
+may select among multiple reviewed receipts, but this checkpoint intentionally
+does not infer or synthesize such coverage.
+
 ## Human review remains separate
 
 Successful technical production authority still returns:
@@ -89,8 +96,9 @@ Instead it proves:
   production authority;
 - receipt/request/profile/evidence drift fails closed;
 - CP6 independently re-parses/revalidates the exact qualification receipt against
-  the manifest request/profile bindings, verifies its normalized summary, and retains
-  both the receipt and physical-evidence artifact in production-authoritative bundles;
+  the manifest request/profile bindings, verifies its normalized summary, and
+  retains both the receipt and physical-evidence artifact in production-
+  authoritative bundles;
 - the production policy requires published CP5 provenance and full technical
   production authority;
 - pricing cannot grant production/order permission;
