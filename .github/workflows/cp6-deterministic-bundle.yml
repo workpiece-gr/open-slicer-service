@@ -1,0 +1,500 @@
+name: FDM v2 CP6 deterministic bundle
+
+on:
+  pull_request:
+    paths:
+      - "app/fdm_production_bundle.py"
+      - "app/fdm_exact_gcode.py"
+      - "app/fdm_gcode_validator.py"
+      - "app/fdm_profile_driven_gcode.py"
+      - "app/fdm_instance_plate_evidence.py"
+      - "app/fdm_toolchain_provenance.py"
+      - "app/fdm_authority.py"
+      - "tests/test_fdm_production_bundle.py"
+      - "Dockerfile.toolchain"
+      - "Dockerfile.authority"
+      - "fdm-toolchain.lock.json"
+      - "profiles/**"
+      - ".github/workflows/cp6-deterministic-bundle.yml"
+  push:
+    branches:
+      - main
+      - "chris/fdm-v2-cp6-deterministic-bundle"
+    paths:
+      - "app/fdm_production_bundle.py"
+      - "tests/test_fdm_production_bundle.py"
+      - "Dockerfile.toolchain"
+      - "Dockerfile.authority"
+      - "fdm-toolchain.lock.json"
+      - "profiles/**"
+      - ".github/workflows/cp6-deterministic-bundle.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ratrig-deterministic-bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build pinned CP5 toolchain candidate
+        run: docker build -f Dockerfile.toolchain -t workpiece-fdm-toolchain:cp6 .
+
+      - name: Retain exact CP5 toolchain evidence
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cp6-evidence
+          container_id=$(docker create workpiece-fdm-toolchain:cp6)
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/opt/workpiece-toolchain/manifest.json" /tmp/cp6-evidence/toolchain-manifest.json
+          docker cp "$container_id:/opt/workpiece-toolchain/packages.txt" /tmp/cp6-evidence/packages.txt
+          docker cp "$container_id:/opt/orca/squashfs-root/AppRun" /tmp/cp6-evidence/orca-AppRun
+          docker rm "$container_id"
+          trap - EXIT
+          docker image inspect --format '{{.Id}}' workpiece-fdm-toolchain:cp6 > /tmp/cp6-evidence/toolchain-image-id.txt
+
+      - name: Build parallel authority service candidate
+        run: |
+          docker build \
+            -f Dockerfile.authority \
+            --build-arg TOOLCHAIN_IMAGE=workpiece-fdm-toolchain:cp6 \
+            -t workpiece-fdm-authority:cp6 \
+            .
+          docker image inspect --format '{{.Id}}' workpiece-fdm-authority:cp6 > /tmp/cp6-evidence/runtime-image-id.txt
+
+      - name: Build exact unpublished CP5 provenance receipt
+        env:
+          SOURCE_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_toolchain_provenance import build_toolchain_provenance
+
+          def local_ref(name: str, path: str) -> str:
+              image_id = Path(path).read_text(encoding="utf-8").strip().lower()
+              assert image_id.startswith("sha256:") and len(image_id) == 71
+              return f"{name}@{image_id}"
+
+          receipt = build_toolchain_provenance(
+              lock_bytes=Path("fdm-toolchain.lock.json").read_bytes(),
+              manifest_bytes=Path("/tmp/cp6-evidence/toolchain-manifest.json").read_bytes(),
+              orca_runtime_bytes=Path("/tmp/cp6-evidence/orca-AppRun").read_bytes(),
+              service_commit=os.environ["SOURCE_COMMIT_SHA"],
+              runtime_image_ref=local_ref("workpiece-fdm-authority:cp6", "/tmp/cp6-evidence/runtime-image-id.txt"),
+              require_published=False,
+              candidate_toolchain_image_ref=local_ref("workpiece-fdm-toolchain:cp6", "/tmp/cp6-evidence/toolchain-image-id.txt"),
+          )
+          assert receipt["authorityState"] == "evidence_candidate"
+          assert receipt["authorityCriticalComplete"] is False
+          assert receipt["lockStatus"] == "unpublished"
+          Path("/tmp/cp6-evidence/toolchain-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Start authority service candidate
+        run: |
+          docker run -d --name workpiece-cp6 -p 8080:8080 \
+            -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
+            -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
+            -e WORKPIECE_PROJECT_API_TOKEN=ci-project-token \
+            -e PROJECT_QUEUE_TIMEOUT_SECONDS=30 \
+            workpiece-fdm-authority:cp6
+
+      - name: Wait for health
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health >/tmp/cp6-evidence/health.json; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs workpiece-cp6
+          exit 1
+
+      - name: Generate multi-plate RatRig fixture and exact production 3MF
+        run: |
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          faces = [
+              (0,2,1),(0,3,2),(4,5,6),(4,6,7),
+              (0,1,5),(0,5,4),(1,2,6),(1,6,5),
+              (2,3,7),(2,7,6),(3,0,4),(3,4,7),
+          ]
+          vertices = [
+              (0,0,0),(132,0,0),(132,132,0),(0,132,0),
+              (0,0,0.8),(132,0,0.8),(132,132,0.8),(0,132,0.8),
+          ]
+          with Path("/tmp/cp6-ratrig.stl").open("wb") as handle:
+              handle.write(b"Workpiece CP6 deterministic bundle fixture".ljust(80, b"\0"))
+              handle.write(struct.pack("<I", len(faces)))
+              for face in faces:
+                  points = [vertices[index] for index in face]
+                  handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
+          PY
+
+          curl --fail-with-body --max-time 240 \
+            -H "Authorization: Bearer ci-project-token" \
+            -F file=@/tmp/cp6-ratrig.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=5 \
+            -F printer=ratrig_vcore3_300 \
+            -F verify=false \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/cp6-project.json
+
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/cp6-project.json").read_text(encoding="utf-8"))
+          assert payload["printer"]["key"] == "ratrig_vcore3_300"
+          assert payload["printer"]["temporary_generic"] is False
+          assert payload["request"]["quantity"] == 5
+          inspection = payload["project"]["inspection"]
+          assert inspection["instance_count"] == 5
+          assert len(inspection["plates"]) >= 2
+          project = base64.b64decode(payload["project"]["base64"], validate=True)
+          assert hashlib.sha256(project).hexdigest() == payload["project"]["sha256"]
+          Path("/tmp/cp6-production.3mf").write_bytes(project)
+          generation = {
+              "source": {"sha256": payload["source"]["sha256"]},
+              "printer": {"key": payload["printer"]["key"], "temporary_generic": payload["printer"]["temporary_generic"]},
+              "profiles": payload["profiles"],
+              "engine": payload["engine"],
+              "project": {"sha256": payload["project"]["sha256"]},
+          }
+          Path("/tmp/cp6-generation-receipt.json").write_text(json.dumps(generation, indent=2), encoding="utf-8")
+          PY
+
+      - name: Execute CP2 through CP4 and build CP6 bundle twice
+        run: |
+          docker cp /tmp/cp6-ratrig.stl workpiece-cp6:/tmp/cp6-ratrig.stl
+          docker cp /tmp/cp6-production.3mf workpiece-cp6:/tmp/cp6-production.3mf
+          docker cp /tmp/cp6-generation-receipt.json workpiece-cp6:/tmp/cp6-generation-receipt.json
+          docker cp /tmp/cp6-evidence/toolchain-receipt.json workpiece-cp6:/tmp/cp6-toolchain-receipt.json
+          set +e
+          docker exec -i workpiece-cp6 python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_authority import evaluate_fdm_authority
+          from app.fdm_exact_gcode import execute_exact_project_gcode
+          from app.fdm_instance_plate_evidence import build_instance_plate_evidence
+          from app.fdm_production_bundle import build_fdm_production_bundle
+          from app.fdm_profile_driven_gcode import validate_profile_driven_gcode
+          from app.main import MATERIALS, build_process_profile, parse_gcode_summary
+
+          source_path = Path("/tmp/cp6-ratrig.stl")
+          project_path = Path("/tmp/cp6-production.3mf")
+          generation = json.loads(Path("/tmp/cp6-generation-receipt.json").read_text(encoding="utf-8"))
+          toolchain = json.loads(Path("/tmp/cp6-toolchain-receipt.json").read_text(encoding="utf-8"))
+          runtime_ref = toolchain["executionEnvironment"]["reference"]
+
+          exact = execute_exact_project_gcode(
+              orca_bin=Path(os.environ["ORCA_BIN"]),
+              project_path=project_path,
+              output_dir=Path("/tmp/cp6-exact-gcode"),
+              timeout_seconds=300,
+              generation_receipt=generation,
+              base_env=os.environ,
+          )
+          assert len(exact["plates"]) >= 2
+
+          process_path = Path("/tmp/cp6-process.json")
+          build_process_profile(
+              Path("/app/profiles/process/pla.json"),
+              "balanced",
+              "functional",
+              process_path,
+              str(MATERIALS["pla"]["label"]),
+              automatic_supports=True,
+              project_reopen_safe=True,
+              single_colour_project=True,
+          )
+          machine_bytes = Path("/app/profiles/machine.json").read_bytes()
+          process_bytes = process_path.read_bytes()
+          filament_bytes = Path("/app/profiles/filament/pla.json").read_bytes()
+          profiles = {"machine": machine_bytes, "process": process_bytes, "filament": filament_bytes}
+          for kind, payload in profiles.items():
+              assert hashlib.sha256(payload).hexdigest() == exact["generation_receipt"]["profiles"][kind]["sha256"]
+
+          validations = {}
+          artifacts = {}
+          statistics = {}
+          for plate in exact["plates"]:
+              plate_id = plate["plate_id"]
+              validation = validate_profile_driven_gcode(
+                  artifact=plate,
+                  generation_receipt=exact["generation_receipt"],
+                  machine_profile_bytes=machine_bytes,
+                  process_profile_bytes=process_bytes,
+                  filament_profile_bytes=filament_bytes,
+                  validator_service_commit=os.environ["SOURCE_COMMIT_SHA"],
+                  toolchain_ref=runtime_ref,
+              )
+              assert validation["passed"] is True
+              assert validation["authorityCriticalComplete"] is True
+              validations[plate_id] = validation
+              artifacts[plate_id] = plate
+              summary = parse_gcode_summary(Path("/tmp/cp6-exact-gcode") / plate["filename"])
+              assert summary["filament_grams"] and summary["print_time_seconds"] and summary["layer_count"]
+              statistics[plate_id] = summary
+
+          cp4 = build_instance_plate_evidence(
+              project_bytes=project_path.read_bytes(),
+              exact_gcode_result=exact,
+              cp3_validations=validations,
+              machine_profile_bytes=machine_bytes,
+          )
+          assert cp4["totals"]["instanceCount"] == 5
+          assert cp4["totals"]["plateCount"] == len(exact["plates"])
+
+          manifest_instances = [
+              {
+                  "id": item["id"],
+                  "objectId": item["objectId"],
+                  "plateId": item["plateId"],
+                  "transform": item["transform"],
+                  "boundsMm": item["boundsMm"],
+              }
+              for item in cp4["instances"]
+          ]
+          profile_hashes = {kind: exact["generation_receipt"]["profiles"][kind]["sha256"] for kind in ("machine", "process", "filament")}
+          manifest_plates = []
+          total_filament = 0.0
+          total_time = 0
+          for cp4_plate in cp4["plates"]:
+              plate_id = int(cp4_plate["index"])
+              artifact = artifacts[plate_id]
+              summary = statistics[plate_id]
+              total_filament += float(summary["filament_grams"])
+              total_time += int(summary["print_time_seconds"])
+              manifest_plates.append(
+                  {
+                      "id": cp4_plate["id"],
+                      "index": cp4_plate["index"],
+                      "instanceIds": cp4_plate["instanceIds"],
+                      "projectSha256": exact["project_sha256"],
+                      "profileSha256": dict(profile_hashes),
+                      "toolchainRef": runtime_ref,
+                      "gcode": {
+                          "filename": artifact["filename"],
+                          "bytes": artifact["byte_count"],
+                          "sha256": artifact["sha256"],
+                      },
+                      "validation": validations[plate_id],
+                      "statistics": {
+                          "filamentGrams": float(summary["filament_grams"]),
+                          "printTimeSeconds": int(summary["print_time_seconds"]),
+                          "layerCount": int(summary["layer_count"]),
+                          "filamentSource": "reported_from_hashed_gcode",
+                          "printTimeSource": "reported_from_hashed_gcode",
+                          "layerCountSource": "reported_from_hashed_gcode",
+                      },
+                  }
+              )
+
+          source_bytes = source_path.read_bytes()
+          project_bytes = project_path.read_bytes()
+          production_manifest = {
+              "contractVersion": "fdm-production-manifest/2.0.0",
+              "job": {
+                  "contractVersion": "fdm-job/2.0.0",
+                  "request": {
+                      "material": "pla",
+                      "quality": "balanced",
+                      "strength": "functional",
+                      "quantity": 5,
+                      "supports": "automatic",
+                      "orientation": "orca_auto",
+                      "arrangement": "orca_auto",
+                  },
+              },
+              "source": {
+                  "filename": "cp6-ratrig.stl",
+                  "bytes": len(source_bytes),
+                  "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                  "immutable": True,
+              },
+              "machine": {
+                  "key": "ratrig_vcore3_300",
+                  "qualification": {
+                      "productionReady": False,
+                      "evidenceId": "cp6-ci-candidate-no-physical-qualification",
+                  },
+              },
+              "profiles": exact["generation_receipt"]["profiles"],
+              "toolchain": toolchain,
+              "project": {
+                  "filename": "workpiece-production.3mf",
+                  "bytes": len(project_bytes),
+                  "sha256": hashlib.sha256(project_bytes).hexdigest(),
+                  "sourceSha256": hashlib.sha256(source_bytes).hexdigest(),
+                  "profileSha256": dict(profile_hashes),
+                  "toolchainRef": runtime_ref,
+              },
+              "instances": manifest_instances,
+              "plates": manifest_plates,
+              "instancePlateEvidence": cp4,
+              "totals": {
+                  "plateCount": len(manifest_plates),
+                  "instanceCount": len(manifest_instances),
+                  "filamentGrams": total_filament,
+                  "printTimeSeconds": total_time,
+              },
+              "commercial": {"priceAuthoritative": False, "authority": "preview_only"},
+              "review": {"required": True, "status": "pending"},
+          }
+          evaluation = evaluate_fdm_authority(production_manifest)
+          issue_codes = {issue.code for issue in evaluation.issues}
+          assert evaluation.state == "evidence_candidate"
+          assert issue_codes == {"missing_immutable_toolchain", "machine_not_production_ready"}, issue_codes
+
+          bundle_args = {
+              "manifest": production_manifest,
+              "source_bytes": source_bytes,
+              "project_bytes": project_bytes,
+              "profile_bytes": profiles,
+              "gcode_bytes_by_plate": {str(key): bytes(value["bytes"]) for key, value in artifacts.items()},
+              "toolchain_lock_bytes": Path("/app/fdm-toolchain.lock.json").read_bytes(),
+              "toolchain_manifest_bytes": Path("/opt/workpiece-toolchain/manifest.json").read_bytes(),
+              "package_inventory_bytes": Path("/opt/workpiece-toolchain/packages.txt").read_bytes(),
+              "require_production_authority": False,
+          }
+          first = build_fdm_production_bundle(**bundle_args)
+          second = build_fdm_production_bundle(**bundle_args)
+          assert first.bytes == second.bytes
+          assert first.sha256 == second.sha256
+          assert first.authority_state == "evidence_candidate"
+          assert first.member_count == 12 + 2 * len(manifest_plates)
+
+          Path("/tmp/cp6-production-manifest.json").write_text(json.dumps(production_manifest, indent=2) + "\n", encoding="utf-8")
+          Path("/tmp/cp6-bundle.zip").write_bytes(first.bytes)
+          Path("/tmp/cp6-bundle-manifest.json").write_bytes(first.manifest_bytes)
+          Path("/tmp/cp6-bundle-index.json").write_bytes(first.index_bytes)
+          Path("/tmp/cp6-report.json").write_text(
+              json.dumps(
+                  {
+                      "authorityState": first.authority_state,
+                      "authorityIssues": sorted(issue_codes),
+                      "bundleFilename": first.filename,
+                      "bundleSha256": first.sha256,
+                      "bundleBytes": len(first.bytes),
+                      "manifestSha256": first.manifest_sha256,
+                      "indexSha256": first.index_sha256,
+                      "memberCount": first.member_count,
+                      "plateCount": len(manifest_plates),
+                      "instanceCount": len(manifest_instances),
+                      "productionEnablementPerformed": False,
+                  },
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          status=$?
+          set -e
+          docker cp workpiece-cp6:/tmp/cp6-production-manifest.json /tmp/cp6-evidence/cp6-production-manifest.json || true
+          docker cp workpiece-cp6:/tmp/cp6-bundle.zip /tmp/cp6-evidence/cp6-bundle.zip || true
+          docker cp workpiece-cp6:/tmp/cp6-bundle-manifest.json /tmp/cp6-evidence/cp6-bundle-manifest.json || true
+          docker cp workpiece-cp6:/tmp/cp6-bundle-index.json /tmp/cp6-evidence/cp6-bundle-index.json || true
+          docker cp workpiece-cp6:/tmp/cp6-report.json /tmp/cp6-evidence/cp6-report.json || true
+          docker cp workpiece-cp6:/tmp/cp6-process.json /tmp/cp6-evidence/cp6-process.json || true
+          docker cp workpiece-cp6:/tmp/cp6-exact-gcode /tmp/cp6-exact-gcode || true
+          if [ -f /tmp/cp6-evidence/cp6-report.json ]; then cat /tmp/cp6-evidence/cp6-report.json; fi
+          exit "$status"
+
+      - name: Rebuild and re-hash deterministic bundle on host
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import io
+          import json
+          import zipfile
+          from pathlib import Path
+
+          from app.fdm_production_bundle import build_fdm_production_bundle
+
+          report = json.loads(Path("/tmp/cp6-evidence/cp6-report.json").read_text(encoding="utf-8"))
+          manifest = json.loads(Path("/tmp/cp6-evidence/cp6-production-manifest.json").read_text(encoding="utf-8"))
+          retained_bundle = Path("/tmp/cp6-evidence/cp6-bundle.zip").read_bytes()
+          assert hashlib.sha256(retained_bundle).hexdigest() == report["bundleSha256"]
+          assert report["authorityState"] == "evidence_candidate"
+          assert report["authorityIssues"] == ["machine_not_production_ready", "missing_immutable_toolchain"]
+          assert report["productionEnablementPerformed"] is False
+
+          gcodes = {}
+          for plate in manifest["plates"]:
+              path = Path("/tmp/cp6-exact-gcode") / plate["gcode"]["filename"]
+              payload = path.read_bytes()
+              assert hashlib.sha256(payload).hexdigest() == plate["gcode"]["sha256"]
+              gcodes[str(plate["id"])] = payload
+
+          rebuilt = build_fdm_production_bundle(
+              manifest=manifest,
+              source_bytes=Path("/tmp/cp6-ratrig.stl").read_bytes(),
+              project_bytes=Path("/tmp/cp6-production.3mf").read_bytes(),
+              profile_bytes={
+                  "machine": Path("profiles/machine.json").read_bytes(),
+                  "process": Path("/tmp/cp6-evidence/cp6-process.json").read_bytes(),
+                  "filament": Path("profiles/filament/pla.json").read_bytes(),
+              },
+              gcode_bytes_by_plate=gcodes,
+              toolchain_lock_bytes=Path("fdm-toolchain.lock.json").read_bytes(),
+              toolchain_manifest_bytes=Path("/tmp/cp6-evidence/toolchain-manifest.json").read_bytes(),
+              package_inventory_bytes=Path("/tmp/cp6-evidence/packages.txt").read_bytes(),
+              require_production_authority=False,
+          )
+          assert rebuilt.bytes == retained_bundle
+          assert rebuilt.sha256 == report["bundleSha256"]
+          assert rebuilt.member_count == report["memberCount"]
+
+          with zipfile.ZipFile(io.BytesIO(retained_bundle), "r") as archive:
+              names = archive.namelist()
+              assert names[-2:] == ["manifest.json", "bundle-index.json"]
+              assert len(names) == len(set(names)) == report["memberCount"]
+              assert all(item.date_time == (1980, 1, 1, 0, 0, 0) for item in archive.infolist())
+              assert all(item.compress_type == zipfile.ZIP_STORED for item in archive.infolist())
+              index = json.loads(archive.read("bundle-index.json"))
+              assert len(index["members"]) == len(names) - 1
+              for member in index["members"]:
+                  payload = archive.read(member["path"])
+                  assert len(payload) == member["bytes"]
+                  assert hashlib.sha256(payload).hexdigest() == member["sha256"]
+          PY
+
+      - name: Upload CP6 deterministic bundle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp6-deterministic-fdm-bundle
+          path: |
+            /tmp/cp6-evidence/cp6-report.json
+            /tmp/cp6-evidence/cp6-production-manifest.json
+            /tmp/cp6-evidence/cp6-bundle-manifest.json
+            /tmp/cp6-evidence/cp6-bundle-index.json
+            /tmp/cp6-evidence/cp6-bundle.zip
+            /tmp/cp6-evidence/toolchain-receipt.json
+            /tmp/cp6-evidence/toolchain-manifest.json
+            /tmp/cp6-evidence/packages.txt
+            /tmp/cp6-exact-gcode/*.gcode
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker logs workpiece-cp6 || true
