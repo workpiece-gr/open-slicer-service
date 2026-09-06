@@ -106,3 +106,14 @@ def test_candidate_orchestrator_rejects_profile_byte_drift_before_orca(tmp_path:
             summarize_gcode=lambda _: {},
             base_env={},
         )
+
+
+def test_candidate_api_does_not_replace_normal_service_entrypoint_or_v1_project_route():
+    dockerfile = Path("Dockerfile.authority").read_text(encoding="utf-8")
+    main_source = Path("app/main.py").read_text(encoding="utf-8")
+    candidate_source = Path("app/authority_candidate_api.py").read_text(encoding="utf-8")
+
+    assert "uvicorn app.main:app" in dockerfile
+    assert '@app.post("/v1/project"' in main_source
+    assert "/v2/authority-candidate" not in main_source
+    assert '@app.post("/v2/authority-candidate")' in candidate_source
