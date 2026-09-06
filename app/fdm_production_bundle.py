@@ -277,7 +277,9 @@ def build_fdm_production_bundle(
         plates.append((index, plate_id, plate, payload, original_gcode_name))
 
     if set(supplied_gcode) != consumed_gcode_keys:
-        raise FdmProductionBundleError("CP6 received G-code bytes for a plate or alias not uniquely consumed by the production manifest.")
+        raise FdmProductionBundleError(
+            "CP6 received G-code bytes for a plate or alias not present in, or not uniquely consumed by, the production manifest."
+        )
     plates.sort(key=lambda item: (item[0], item[1]))
 
     retained: list[tuple[str, bytes]] = [
