@@ -9,6 +9,7 @@ from app.fdm_exact_gcode import (
     collect_exact_gcode_artifacts,
     execute_exact_project_gcode,
     fresh_orca_env,
+    normalize_generation_receipt,
     project_plate_ids,
 )
 
@@ -59,6 +60,21 @@ def write_project(project: Path):
         archive.writestr("Metadata/project_settings.config", "{}")
 
 
+def generation_receipt(project: Path):
+    project_sha = hashlib.sha256(project.read_bytes()).hexdigest()
+    return {
+        "source": {"sha256": "1" * 64},
+        "printer": {"key": "ratrig_vcore3_300", "temporary_generic": False},
+        "profiles": {
+            "machine": {"identity": "ratrig_vcore3_300:machine", "sha256": "2" * 64},
+            "process": {"identity": "ratrig_vcore3_300:pla:balanced:functional:process", "sha256": "3" * 64},
+            "filament": {"identity": "ratrig_vcore3_300:pla:filament", "sha256": "4" * 64},
+        },
+        "engine": {"name": "OrcaSlicer", "version": "2.4.2", "service_commit": "5" * 40},
+        "project": {"sha256": project_sha},
+    }
+
+
 def test_fresh_orca_env_replaces_generation_xdg_state(tmp_path: Path):
     generation_root = tmp_path / "generation-xdg"
     fresh_root = tmp_path / "fresh-xdg"
@@ -78,6 +94,22 @@ def test_fresh_orca_env_replaces_generation_xdg_state(tmp_path: Path):
     (fresh_root / "state.txt").write_text("not clean", encoding="utf-8")
     with pytest.raises(ValueError, match="must be empty"):
         fresh_orca_env(base, fresh_root)
+
+
+def test_generation_receipt_binds_project_source_profiles_and_service(tmp_path: Path):
+    project = tmp_path / "workpiece-production.3mf"
+    write_project(project)
+    receipt = generation_receipt(project)
+    normalized = normalize_generation_receipt(receipt, project_sha256=receipt["project"]["sha256"])
+    assert normalized["source"]["sha256"] == "1" * 64
+    assert normalized["printer"]["key"] == "ratrig_vcore3_300"
+    assert normalized["profiles"]["machine"]["sha256"] == "2" * 64
+    assert normalized["engine"]["version"] == "2.4.2"
+
+    bad = generation_receipt(project)
+    bad["project"]["sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="does not match the retained production 3MF"):
+        normalize_generation_receipt(bad, project_sha256=receipt["project"]["sha256"])
 
 
 def test_execute_exact_project_uses_only_retained_3mf_and_retains_hashed_bytes(tmp_path: Path, monkeypatch):
@@ -102,6 +134,7 @@ def test_execute_exact_project_uses_only_retained_3mf_and_retains_hashed_bytes(t
         project_path=project,
         output_dir=output,
         timeout_seconds=60,
+        generation_receipt=generation_receipt(project),
         base_env={
             "PATH": "/usr/bin",
             "XDG_CONFIG_HOME": str(tmp_path / "generation" / "config"),
@@ -116,6 +149,7 @@ def test_execute_exact_project_uses_only_retained_3mf_and_retains_hashed_bytes(t
     assert "--load-filaments" not in captured["command"]
     assert captured["cwd"] == project.parent
     assert captured["env"]["XDG_CONFIG_HOME"] == str(output / ".xdg" / "config")
+    assert result["authority_state"] == "evidence_candidate"
     assert result["reopened_exact_project"] is True
     assert result["fresh_runtime_state"] is True
     assert result["plate_ids"] == [1]
@@ -123,6 +157,38 @@ def test_execute_exact_project_uses_only_retained_3mf_and_retains_hashed_bytes(t
     assert result["plates"][0]["bytes"] == b"exact retained bytes"
     assert result["plates"][0]["sha256"] == hashlib.sha256(b"exact retained bytes").hexdigest()
     assert result["plates"][0]["project_sha256"] == result["project_sha256"]
+    assert result["plates"][0]["source_sha256"] == "1" * 64
+    assert result["plates"][0]["profile_sha256"] == {
+        "machine": "2" * 64,
+        "process": "3" * 64,
+        "filament": "4" * 64,
+    }
+    assert result["plates"][0]["service_commit"] == "5" * 40
+
+
+def test_execute_exact_project_fails_if_orca_changes_retained_3mf(tmp_path: Path, monkeypatch):
+    project = tmp_path / "workpiece-production.3mf"
+    write_project(project)
+    receipt = generation_receipt(project)
+    orca = tmp_path / "AppRun"
+    orca.write_text("fake", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        with project.open("ab") as handle:
+            handle.write(b"mutated")
+        write_gcode(Path(command[command.index("--outputdir") + 1]), "plate_1.gcode")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.fdm_exact_gcode.subprocess.run", fake_run)
+    with pytest.raises(ValueError, match="changed during exact-project slicing"):
+        execute_exact_project_gcode(
+            orca_bin=orca,
+            project_path=project,
+            output_dir=tmp_path / "exact-output",
+            timeout_seconds=60,
+            generation_receipt=receipt,
+            base_env={"PATH": "/usr/bin"},
+        )
 
 
 def test_project_plate_ids_require_nonempty_unique_physical_plates():
