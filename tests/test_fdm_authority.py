@@ -10,6 +10,7 @@ from app.fdm_authority import (
     FDM_PRODUCTION_MANIFEST_VERSION,
     evaluate_fdm_authority,
 )
+from app.fdm_instance_plate_evidence import INSTANCE_PLATE_EVIDENCE_VERSION
 
 
 SHA = {
@@ -40,7 +41,7 @@ def valid_manifest() -> dict:
             "toolchainRef": RUNTIME_REF,
         }
 
-    return {
+    manifest = {
         "contractVersion": FDM_PRODUCTION_MANIFEST_VERSION,
         "job": {
             "contractVersion": FDM_JOB_CONTRACT_VERSION,
@@ -136,6 +137,60 @@ def valid_manifest() -> dict:
         "commercial": {"priceAuthoritative": False, "authority": "preview_only"},
         "review": {"required": True, "status": "pending"},
     }
+    manifest["instancePlateEvidence"] = {
+        "contractVersion": INSTANCE_PLATE_EVIDENCE_VERSION,
+        "authorityState": AUTHORITY_EVIDENCE_CANDIDATE,
+        "projectSha256": SHA["project"],
+        "sourceSha256": SHA["source"],
+        "printerKey": "ratrig_vcore3_300",
+        "profileSha256": dict(PROFILE_HASHES),
+        "instances": [
+            {
+                **copy.deepcopy(manifest["instances"][0]),
+                "gcodeEvidence": {
+                    "objectName": "object-001",
+                    "definitionCenterMm": [20, 20],
+                    "definitionBoundsMm": {"min": [10, 10], "max": [30, 30]},
+                    "extrusionSegmentCount": 100,
+                    "extrusionBoundsMm": {"min": [10.2, 10.2, 0.2], "max": [29.8, 29.8, 20]},
+                    "gcodeSha256": SHA["gcode1"],
+                },
+            },
+            {
+                **copy.deepcopy(manifest["instances"][1]),
+                "gcodeEvidence": {
+                    "objectName": "object-002",
+                    "definitionCenterMm": [22, 22],
+                    "definitionBoundsMm": {"min": [12, 12], "max": [32, 32]},
+                    "extrusionSegmentCount": 101,
+                    "extrusionBoundsMm": {"min": [12.2, 12.2, 0.2], "max": [31.8, 31.8, 20]},
+                    "gcodeSha256": SHA["gcode2"],
+                },
+            },
+        ],
+        "plates": [
+            {
+                "id": "plate-001",
+                "index": 1,
+                "projectSha256": SHA["project"],
+                "gcodeSha256": SHA["gcode1"],
+                "validationGcodeSha256": SHA["gcode1"],
+                "instanceIds": ["instance-001"],
+                "objectNames": ["object-001"],
+            },
+            {
+                "id": "plate-002",
+                "index": 2,
+                "projectSha256": SHA["project"],
+                "gcodeSha256": SHA["gcode2"],
+                "validationGcodeSha256": SHA["gcode2"],
+                "instanceIds": ["instance-002"],
+                "objectNames": ["object-002"],
+            },
+        ],
+        "totals": {"instanceCount": 2, "plateCount": 2},
+    }
+    return manifest
 
 
 def assert_candidate_with(manifest: dict, code: str) -> None:
@@ -247,3 +302,33 @@ def test_duplicate_instance_definition_fails_closed():
     manifest["instances"].append(duplicate)
     manifest["job"]["request"]["quantity"] = 3
     assert_candidate_with(manifest, "duplicate_instance_id")
+
+
+def test_cp4_instance_plate_evidence_is_required_for_production_authority():
+    manifest = valid_manifest()
+    del manifest["instancePlateEvidence"]
+    assert_candidate_with(manifest, "missing_instance_plate_evidence")
+
+
+def test_cp4_instance_transform_must_match_manifest_instance():
+    manifest = valid_manifest()
+    manifest["instancePlateEvidence"]["instances"][0]["transform"][9] = 11
+    assert_candidate_with(manifest, "instance_plate_evidence_transform_mismatch")
+
+
+def test_cp4_instance_gcode_must_match_exact_manifest_plate_gcode():
+    manifest = valid_manifest()
+    manifest["instancePlateEvidence"]["instances"][0]["gcodeEvidence"]["gcodeSha256"] = "f" * 64
+    assert_candidate_with(manifest, "instance_gcode_evidence_mismatch")
+
+
+def test_cp4_instance_set_must_exactly_match_manifest_instances():
+    manifest = valid_manifest()
+    manifest["instancePlateEvidence"]["instances"] = manifest["instancePlateEvidence"]["instances"][:1]
+    assert_candidate_with(manifest, "instance_plate_evidence_instance_set_mismatch")
+
+
+def test_cp4_plate_membership_must_match_manifest_order():
+    manifest = valid_manifest()
+    manifest["instancePlateEvidence"]["plates"][0]["instanceIds"] = ["instance-002"]
+    assert_candidate_with(manifest, "instance_plate_evidence_membership_mismatch")
