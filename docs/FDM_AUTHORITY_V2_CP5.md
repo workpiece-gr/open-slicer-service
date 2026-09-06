@@ -109,6 +109,8 @@ That packet is deliberately non-authoritative: it records that publication was n
 
 See [`FDM_AUTHORITY_V2_CP5_PUBLICATION_REVIEW.md`](FDM_AUTHORITY_V2_CP5_PUBLICATION_REVIEW.md) for the review and later operator handoff sequence. The read-only review workflow does not authenticate to GHCR, push images, update the lock, deploy anything, or create physical-machine qualification evidence.
 
+The approval-gated publication and lock-transition procedure is documented separately in [`FDM_AUTHORITY_V2_CP5_PUBLICATION.md`](FDM_AUTHORITY_V2_CP5_PUBLICATION.md). That runbook does not authorize publication; it preserves the current `unpublished` safety boundary until an exact candidate is explicitly approved.
+
 ## Candidate integration gate
 
 The CP5 workflow:
