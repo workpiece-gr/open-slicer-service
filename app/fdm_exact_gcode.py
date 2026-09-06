@@ -1,9 +1,9 @@
 """Exact retained G-code execution for FDM Authority v2 CP2.
 
 The CP2 path accepts an already-retained production 3MF as its sole manufacturing
-input.  It reopens that exact project in a fresh OrcaSlicer process, retains the
+input. It reopens that exact project in a fresh OrcaSlicer process, retains the
 exact per-plate G-code bytes, hashes those same bytes, and binds them back to the
-3MF plate ids.  It does not grant production authority; CP3 validation is still
+3MF plate ids. It does not grant production authority; CP3 validation is still
 required.
 """
 
@@ -198,6 +198,8 @@ def execute_exact_project_gcode(
         stdout = (completed.stdout or "").strip()[-2000:]
         detail = stderr or stdout or f"exit code {completed.returncode}"
         raise RuntimeError(f"Fresh Orca exact-project slicing failed: {detail}")
+    if _sha256_file(project_path) != project_sha256:
+        raise ValueError("The retained production 3MF changed during exact-project slicing.")
 
     artifacts = collect_exact_gcode_artifacts(
         output_dir,
