@@ -1,0 +1,206 @@
+name: FDM v2 CP3 RatRig authority
+
+on:
+  pull_request:
+    paths:
+      - "app/fdm_gcode_validator.py"
+      - "app/fdm_exact_gcode.py"
+      - "profiles/**"
+      - ".github/workflows/cp3-ratrig-authority.yml"
+  push:
+    branches:
+      - main
+      - "chris/fdm-v2-cp3-gcode-validator"
+    paths:
+      - "app/fdm_gcode_validator.py"
+      - "app/fdm_exact_gcode.py"
+      - "profiles/**"
+      - ".github/workflows/cp3-ratrig-authority.yml"
+
+jobs:
+  ratrig-authority:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build Orca service image
+        run: docker build -t workpiece-open-slicer:cp3 .
+
+      - name: Start service
+        run: |
+          docker run -d --name workpiece-slicer -p 8080:8080 \
+            -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
+            -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
+            -e WORKPIECE_PROJECT_API_TOKEN=ci-project-token \
+            -e PROJECT_QUEUE_TIMEOUT_SECONDS=30 \
+            workpiece-open-slicer:cp3
+
+      - name: Wait for health
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health >/tmp/health.json; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs workpiece-slicer
+          exit 1
+
+      - name: Generate RatRig fixture
+        run: |
+          python - <<'PY'
+          import struct
+          from pathlib import Path
+
+          faces = [
+              (0,2,1),(0,3,2),(4,5,6),(4,6,7),
+              (0,1,5),(0,5,4),(1,2,6),(1,6,5),
+              (2,3,7),(2,7,6),(3,0,4),(3,4,7),
+          ]
+          vertices = [
+              (0,0,0),(20,0,0),(20,20,0),(0,20,0),
+              (0,0,20),(20,0,20),(20,20,20),(0,20,20),
+          ]
+          with Path("/tmp/cp3-ratrig.stl").open("wb") as handle:
+              handle.write(b"Workpiece CP3 RatRig fixture".ljust(80, b"\0"))
+              handle.write(struct.pack("<I", len(faces)))
+              for face in faces:
+                  points = [vertices[index] for index in face]
+                  handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
+          PY
+
+      - name: Generate exact RatRig production 3MF without verification slice
+        run: |
+          curl --fail-with-body --max-time 240 \
+            -H "Authorization: Bearer ci-project-token" \
+            -F file=@/tmp/cp3-ratrig.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=1 \
+            -F printer=ratrig_vcore3_300 \
+            -F verify=false \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/cp3-project.json
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/cp3-project.json").read_text(encoding="utf-8"))
+          assert payload["printer"]["key"] == "ratrig_vcore3_300"
+          assert payload["printer"]["temporary_generic"] is False
+          assert payload["request"]["verification_requested"] is False
+          assert payload["project"]["inspection"]["instance_count"] == 1
+          project = base64.b64decode(payload["project"]["base64"], validate=True)
+          assert hashlib.sha256(project).hexdigest() == payload["project"]["sha256"]
+          Path("/tmp/cp3-production.3mf").write_bytes(project)
+
+          exact_profiles = {
+              "machine": Path("profiles/machine.json"),
+              "filament": Path("profiles/filament/pla.json"),
+          }
+          for kind, path in exact_profiles.items():
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == payload["profiles"][kind]["sha256"]
+
+          receipt = {
+              "source": {"sha256": payload["source"]["sha256"]},
+              "printer": {
+                  "key": payload["printer"]["key"],
+                  "temporary_generic": payload["printer"]["temporary_generic"],
+              },
+              "profiles": payload["profiles"],
+              "engine": payload["engine"],
+              "project": {"sha256": payload["project"]["sha256"]},
+          }
+          Path("/tmp/cp3-generation-receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+          PY
+
+      - name: Slice exact 3MF and independently validate exact RatRig G-code
+        run: |
+          docker cp /tmp/cp3-production.3mf workpiece-slicer:/tmp/cp3-production.3mf
+          docker cp /tmp/cp3-generation-receipt.json workpiece-slicer:/tmp/cp3-generation-receipt.json
+          docker exec -i workpiece-slicer python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_exact_gcode import execute_exact_project_gcode
+          from app.fdm_gcode_validator import validate_exact_gcode
+
+          receipt = json.loads(Path("/tmp/cp3-generation-receipt.json").read_text(encoding="utf-8"))
+          exact = execute_exact_project_gcode(
+              orca_bin=Path(os.environ["ORCA_BIN"]),
+              project_path=Path("/tmp/cp3-production.3mf"),
+              output_dir=Path("/tmp/cp3-exact-gcode"),
+              timeout_seconds=300,
+              generation_receipt=receipt,
+              base_env=os.environ,
+          )
+          machine_bytes = Path("/app/profiles/machine.json").read_bytes()
+          filament_bytes = Path("/app/profiles/filament/pla.json").read_bytes()
+          validations = []
+          for plate in exact["plates"]:
+              validation = validate_exact_gcode(
+                  artifact=plate,
+                  generation_receipt=exact["generation_receipt"],
+                  machine_profile_bytes=machine_bytes,
+                  filament_profile_bytes=filament_bytes,
+                  validator_service_commit=os.environ["SOURCE_COMMIT_SHA"],
+                  toolchain_ref=f"ci://open-slicer-service/{os.environ['SOURCE_COMMIT_SHA']}",
+              )
+              validations.append({"plateId": plate["plate_id"], **validation})
+          evidence = {
+              "authorityState": "evidence_candidate",
+              "projectSha256": exact["project_sha256"],
+              "plateIds": exact["plate_ids"],
+              "validations": validations,
+          }
+          Path("/tmp/cp3-validation.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+          failed = [item for item in validations if not item["passed"] or not item["authorityCriticalComplete"]]
+          if failed:
+              print(json.dumps(evidence, indent=2))
+              raise SystemExit("Independent CP3 validation failed for real RatRig G-code")
+          assert validations
+          assert all(item["motion"]["extrusionSegmentCount"] > 0 for item in validations)
+          assert all(item["motion"]["extrusionBoundsMm"] for item in validations)
+          PY
+          docker cp workpiece-slicer:/tmp/cp3-validation.json /tmp/cp3-validation.json
+          docker cp workpiece-slicer:/tmp/cp3-exact-gcode /tmp/cp3-exact-gcode
+
+      - name: Re-hash retained CP3 evidence on host
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          evidence = json.loads(Path("/tmp/cp3-validation.json").read_text(encoding="utf-8"))
+          assert evidence["authorityState"] == "evidence_candidate"
+          assert evidence["validations"]
+          for item in evidence["validations"]:
+              assert item["passed"] is True
+              assert item["authorityCriticalComplete"] is True
+              gcode = Path("/tmp/cp3-exact-gcode") / f"plate_{item['plateId']}.gcode"
+              payload = gcode.read_bytes()
+              assert payload
+              assert hashlib.sha256(payload).hexdigest() == item["gcodeSha256"]
+          PY
+
+      - name: Upload CP3 RatRig evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp3-ratrig-authority-evidence
+          path: |
+            /tmp/cp3-validation.json
+            /tmp/cp3-exact-gcode/*.gcode
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker logs workpiece-slicer || true
