@@ -3,8 +3,8 @@
 The CP2 path accepts an already-retained production 3MF as its sole manufacturing
 input. It reopens that exact project in a fresh OrcaSlicer process, retains the
 exact per-plate G-code bytes, hashes those same bytes, and binds them back to the
-3MF plate ids. It does not grant production authority; CP3 validation is still
-required.
+3MF plate ids and the carried generation receipt. It does not grant production
+authority; CP3 validation is still required.
 """
 
 from __future__ import annotations
@@ -21,10 +21,20 @@ from .project_builder import inspect_project_3mf, verify_project_command
 
 _PLATE_GCODE_RE = re.compile(r"^plate_([1-9][0-9]*)\.gcode$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+_COMMIT_RE = re.compile(r"^[a-f0-9]{40}$")
 
 
 def _record(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _sha256(value: Any) -> str:
+    text = value.strip().lower() if isinstance(value, str) else ""
+    return text if _SHA256_RE.fullmatch(text) else ""
+
+
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _sha256_file(path: Path) -> str:
@@ -54,6 +64,61 @@ def fresh_orca_env(base_env: Mapping[str, str], xdg_root: Path) -> dict[str, str
         "XDG_CONFIG_HOME": str(config),
         "XDG_CACHE_HOME": str(cache),
         "XDG_DATA_HOME": str(data),
+    }
+
+
+def normalize_generation_receipt(receipt_value: Mapping[str, Any] | Any, *, project_sha256: str) -> dict[str, Any]:
+    """Validate and normalize the provenance carried from project generation.
+
+    The receipt is evidence only. None of its profile paths or values are passed
+    back to Orca during the exact-project slice.
+    """
+
+    receipt = _record(receipt_value)
+    source = _record(receipt.get("source"))
+    printer = _record(receipt.get("printer"))
+    profiles = _record(receipt.get("profiles"))
+    engine = _record(receipt.get("engine"))
+    project = _record(receipt.get("project"))
+
+    source_sha = _sha256(source.get("sha256"))
+    printer_key = _text(printer.get("key"))
+    engine_name = _text(engine.get("name"))
+    engine_version = _text(engine.get("version"))
+    service_commit = _text(engine.get("service_commit")).lower()
+    receipt_project_sha = _sha256(project.get("sha256"))
+
+    if not source_sha:
+        raise ValueError("The exact-project generation receipt is missing the immutable source SHA-256.")
+    if not printer_key:
+        raise ValueError("The exact-project generation receipt is missing the selected printer key.")
+    if engine_name != "OrcaSlicer" or not engine_version or not _COMMIT_RE.fullmatch(service_commit):
+        raise ValueError("The exact-project generation receipt has incomplete Orca/service provenance.")
+    if not receipt_project_sha or receipt_project_sha != project_sha256:
+        raise ValueError("The exact-project generation receipt does not match the retained production 3MF SHA-256.")
+
+    normalized_profiles: dict[str, dict[str, str]] = {}
+    for kind in ("machine", "process", "filament"):
+        profile = _record(profiles.get(kind))
+        identity = _text(profile.get("identity"))
+        digest = _sha256(profile.get("sha256"))
+        if not identity or not digest:
+            raise ValueError(f"The exact-project generation receipt is missing the {kind} profile identity or SHA-256.")
+        normalized_profiles[kind] = {"identity": identity, "sha256": digest}
+
+    return {
+        "source": {"sha256": source_sha},
+        "printer": {
+            "key": printer_key,
+            "temporary_generic": printer.get("temporary_generic") is True,
+        },
+        "profiles": normalized_profiles,
+        "engine": {
+            "name": engine_name,
+            "version": engine_version,
+            "service_commit": service_commit,
+        },
+        "project": {"sha256": receipt_project_sha},
     }
 
 
@@ -150,6 +215,7 @@ def execute_exact_project_gcode(
     project_path: Path,
     output_dir: Path,
     timeout_seconds: int,
+    generation_receipt: Mapping[str, Any] | Any,
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Slice the exact retained 3MF in a fresh process and retain exact outputs.
@@ -176,6 +242,7 @@ def execute_exact_project_gcode(
         raise ValueError(f"The retained production 3MF failed inspection: {exc}") from exc
     expected_plate_ids = project_plate_ids(project_inspection)
     project_sha256 = _sha256_file(project_path)
+    provenance = normalize_generation_receipt(generation_receipt, project_sha256=project_sha256)
 
     xdg_root = output_dir / ".xdg"
     env = fresh_orca_env(base_env or os.environ, xdg_root)
@@ -208,12 +275,23 @@ def execute_exact_project_gcode(
     )
     if tuple(artifact["plate_id"] for artifact in artifacts) != expected_plate_ids:
         raise ValueError("Fresh-Orca G-code artifact order does not match the retained 3MF plate ids.")
+    for artifact in artifacts:
+        artifact["source_sha256"] = provenance["source"]["sha256"]
+        artifact["printer_key"] = provenance["printer"]["key"]
+        artifact["profile_sha256"] = {
+            kind: provenance["profiles"][kind]["sha256"]
+            for kind in ("machine", "process", "filament")
+        }
+        artifact["orca_version"] = provenance["engine"]["version"]
+        artifact["service_commit"] = provenance["engine"]["service_commit"]
 
     return {
         "performed": True,
+        "authority_state": "evidence_candidate",
         "reopened_exact_project": True,
         "fresh_runtime_state": True,
         "project_sha256": project_sha256,
         "plate_ids": list(expected_plate_ids),
+        "generation_receipt": provenance,
         "plates": artifacts,
     }
