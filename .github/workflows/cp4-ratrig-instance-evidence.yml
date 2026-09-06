@@ -1,0 +1,256 @@
+name: FDM v2 CP4 RatRig instance evidence
+
+on:
+  pull_request:
+    paths:
+      - "app/fdm_instance_plate_evidence.py"
+      - "app/fdm_exact_gcode.py"
+      - "app/fdm_gcode_validator.py"
+      - "app/fdm_profile_driven_gcode.py"
+      - "tests/test_fdm_instance_plate_evidence.py"
+      - "profiles/**"
+      - ".github/workflows/cp4-ratrig-instance-evidence.yml"
+  push:
+    branches:
+      - main
+      - "chris/fdm-v2-cp4-instance-plate-evidence"
+    paths:
+      - "app/fdm_instance_plate_evidence.py"
+      - "app/fdm_exact_gcode.py"
+      - "app/fdm_gcode_validator.py"
+      - "app/fdm_profile_driven_gcode.py"
+      - "tests/test_fdm_instance_plate_evidence.py"
+      - "profiles/**"
+      - ".github/workflows/cp4-ratrig-instance-evidence.yml"
+
+jobs:
+  ratrig-instance-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build Orca service image
+        run: docker build -t workpiece-open-slicer:cp4 .
+
+      - name: Start service
+        run: |
+          docker run -d --name workpiece-slicer -p 8080:8080 \
+            -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
+            -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
+            -e WORKPIECE_PROJECT_API_TOKEN=ci-project-token \
+            -e PROJECT_QUEUE_TIMEOUT_SECONDS=30 \
+            workpiece-open-slicer:cp4
+
+      - name: Wait for health
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health >/tmp/health.json; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs workpiece-slicer
+          exit 1
+
+      - name: Generate thin multi-plate RatRig fixture
+        run: |
+          python - <<'PY'
+          import struct
+          from pathlib import Path
+
+          faces = [
+              (0,2,1),(0,3,2),(4,5,6),(4,6,7),
+              (0,1,5),(0,5,4),(1,2,6),(1,6,5),
+              (2,3,7),(2,7,6),(3,0,4),(3,4,7),
+          ]
+          vertices = [
+              (0,0,0),(132,0,0),(132,132,0),(0,132,0),
+              (0,0,0.8),(132,0,0.8),(132,132,0.8),(0,132,0.8),
+          ]
+          with Path("/tmp/cp4-ratrig.stl").open("wb") as handle:
+              handle.write(b"Workpiece CP4 multi-plate RatRig fixture".ljust(80, b"\0"))
+              handle.write(struct.pack("<I", len(faces)))
+              for face in faces:
+                  points = [vertices[index] for index in face]
+                  handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
+          PY
+
+      - name: Generate exact five-instance RatRig production 3MF
+        run: |
+          curl --fail-with-body --max-time 240 \
+            -H "Authorization: Bearer ci-project-token" \
+            -F file=@/tmp/cp4-ratrig.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=5 \
+            -F printer=ratrig_vcore3_300 \
+            -F verify=false \
+            http://127.0.0.1:8080/v1/project \
+            -o /tmp/cp4-project.json
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/cp4-project.json").read_text(encoding="utf-8"))
+          assert payload["printer"]["key"] == "ratrig_vcore3_300"
+          assert payload["printer"]["temporary_generic"] is False
+          assert payload["request"]["material"] == "pla"
+          assert payload["request"]["quantity"] == 5
+          assert payload["request"]["verification_requested"] is False
+          inspection = payload["project"]["inspection"]
+          assert inspection["instance_count"] == 5
+          assert len(inspection["plates"]) >= 2
+          assert sum(item["model_instance_count"] for item in inspection["plates"]) == 5
+          project = base64.b64decode(payload["project"]["base64"], validate=True)
+          assert hashlib.sha256(project).hexdigest() == payload["project"]["sha256"]
+          Path("/tmp/cp4-production.3mf").write_bytes(project)
+          receipt = {
+              "source": {"sha256": payload["source"]["sha256"]},
+              "printer": {
+                  "key": payload["printer"]["key"],
+                  "temporary_generic": payload["printer"]["temporary_generic"],
+              },
+              "profiles": payload["profiles"],
+              "engine": payload["engine"],
+              "project": {"sha256": payload["project"]["sha256"]},
+          }
+          Path("/tmp/cp4-generation-receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+          PY
+
+      - name: Slice, validate, and prove exact instance-to-plate evidence
+        run: |
+          docker cp /tmp/cp4-production.3mf workpiece-slicer:/tmp/cp4-production.3mf
+          docker cp /tmp/cp4-generation-receipt.json workpiece-slicer:/tmp/cp4-generation-receipt.json
+          set +e
+          docker exec -i workpiece-slicer python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_exact_gcode import execute_exact_project_gcode
+          from app.fdm_instance_plate_evidence import build_instance_plate_evidence
+          from app.fdm_profile_driven_gcode import validate_profile_driven_gcode
+          from app.main import MATERIALS, build_process_profile
+
+          receipt = json.loads(Path("/tmp/cp4-generation-receipt.json").read_text(encoding="utf-8"))
+          project_path = Path("/tmp/cp4-production.3mf")
+          exact = execute_exact_project_gcode(
+              orca_bin=Path(os.environ["ORCA_BIN"]),
+              project_path=project_path,
+              output_dir=Path("/tmp/cp4-exact-gcode"),
+              timeout_seconds=300,
+              generation_receipt=receipt,
+              base_env=os.environ,
+          )
+          assert len(exact["plates"]) >= 2
+
+          process_path = Path("/tmp/cp4-process.json")
+          build_process_profile(
+              Path("/app/profiles/process/pla.json"),
+              "balanced",
+              "functional",
+              process_path,
+              str(MATERIALS["pla"]["label"]),
+              automatic_supports=True,
+              project_reopen_safe=True,
+              single_colour_project=True,
+          )
+          machine_bytes = Path("/app/profiles/machine.json").read_bytes()
+          process_bytes = process_path.read_bytes()
+          filament_bytes = Path("/app/profiles/filament/pla.json").read_bytes()
+          assert hashlib.sha256(process_bytes).hexdigest() == exact["generation_receipt"]["profiles"]["process"]["sha256"]
+
+          validations = {}
+          for plate in exact["plates"]:
+              validation = validate_profile_driven_gcode(
+                  artifact=plate,
+                  generation_receipt=exact["generation_receipt"],
+                  machine_profile_bytes=machine_bytes,
+                  process_profile_bytes=process_bytes,
+                  filament_profile_bytes=filament_bytes,
+                  validator_service_commit=os.environ["SOURCE_COMMIT_SHA"],
+                  toolchain_ref=f"ci://open-slicer-service/{os.environ['SOURCE_COMMIT_SHA']}",
+              )
+              assert validation["passed"] is True
+              assert validation["authorityCriticalComplete"] is True
+              validations[plate["plate_id"]] = validation
+
+          evidence = build_instance_plate_evidence(
+              project_bytes=project_path.read_bytes(),
+              exact_gcode_result=exact,
+              cp3_validations=validations,
+              machine_profile_bytes=machine_bytes,
+          )
+          assert evidence["authorityState"] == "evidence_candidate"
+          assert evidence["totals"]["instanceCount"] == 5
+          assert evidence["totals"]["plateCount"] >= 2
+          assert len({item["id"] for item in evidence["instances"]}) == 5
+          assert sum(len(plate["instanceIds"]) for plate in evidence["plates"]) == 5
+          assert all(item["gcodeEvidence"]["extrusionSegmentCount"] > 0 for item in evidence["instances"])
+          Path("/tmp/cp4-instance-evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+          Path("/tmp/cp4-validations.json").write_text(
+              json.dumps({str(key): value for key, value in validations.items()}, indent=2),
+              encoding="utf-8",
+          )
+          PY
+          status=$?
+          set -e
+          docker cp workpiece-slicer:/tmp/cp4-instance-evidence.json /tmp/cp4-instance-evidence.json || true
+          docker cp workpiece-slicer:/tmp/cp4-validations.json /tmp/cp4-validations.json || true
+          docker cp workpiece-slicer:/tmp/cp4-exact-gcode /tmp/cp4-exact-gcode || true
+          if [ -f /tmp/cp4-instance-evidence.json ]; then
+            cat /tmp/cp4-instance-evidence.json
+          fi
+          exit "$status"
+
+      - name: Re-hash and reconcile retained CP4 evidence on host
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          evidence = json.loads(Path("/tmp/cp4-instance-evidence.json").read_text(encoding="utf-8"))
+          assert evidence["contractVersion"] == "fdm-instance-plate-evidence/1.0.0"
+          assert evidence["authorityState"] == "evidence_candidate"
+          instances = {item["id"]: item for item in evidence["instances"]}
+          memberships = Counter()
+          for plate in evidence["plates"]:
+              gcode = Path("/tmp/cp4-exact-gcode") / f"plate_{plate['index']}.gcode"
+              payload = gcode.read_bytes()
+              assert payload
+              assert hashlib.sha256(payload).hexdigest() == plate["gcodeSha256"]
+              assert plate["validationGcodeSha256"] == plate["gcodeSha256"]
+              for instance_id in plate["instanceIds"]:
+                  assert instance_id in instances
+                  assert instances[instance_id]["plateId"] == plate["id"]
+                  assert instances[instance_id]["gcodeEvidence"]["gcodeSha256"] == plate["gcodeSha256"]
+                  memberships[instance_id] += 1
+          assert len(instances) == 5
+          assert set(memberships) == set(instances)
+          assert all(count == 1 for count in memberships.values())
+          PY
+
+      - name: Upload CP4 RatRig evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp4-ratrig-instance-plate-evidence
+          path: |
+            /tmp/cp4-instance-evidence.json
+            /tmp/cp4-validations.json
+            /tmp/cp4-exact-gcode/*.gcode
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker logs workpiece-slicer || true
