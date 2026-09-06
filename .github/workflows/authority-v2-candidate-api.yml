@@ -149,12 +149,15 @@ jobs:
             -o /tmp/authority-v2-response.json
 
       - name: Independently verify candidate response and deterministic bundle
+        env:
+          EXPECTED_SERVICE_COMMIT: ${{ github.sha }}
         run: |
           python3 - <<'PY'
           import base64
           import hashlib
           import io
           import json
+          import os
           import zipfile
           from pathlib import Path
 
@@ -179,7 +182,7 @@ jobs:
           assert pricing['productionOrderEligible'] is False
           assert pricing['productionEnablementPerformed'] is False
           assert pricing['humanReview']=={'required':True,'status':'pending'}
-          assert pricing['pricingEngine']['serviceCommit']=='${GITHUB_SHA}'.lower()
+          assert pricing['pricingEngine']['serviceCommit']==os.environ['EXPECTED_SERVICE_COMMIT'].lower()
 
           bundle=base64.b64decode(payload['bundle']['base64'],validate=True)
           assert len(bundle)==payload['bundle']['bytes']
