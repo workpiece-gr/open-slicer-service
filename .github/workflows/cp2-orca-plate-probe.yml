@@ -21,6 +21,7 @@ jobs:
         run: |
           docker run -d --name workpiece-slicer -p 8080:8080 \
             -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
             -e ALLOWED_ORIGINS=http://localhost:3000 \
             -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
             -e WORKPIECE_PROJECT_API_TOKEN=ci-project-token \
@@ -86,9 +87,22 @@ jobs:
           assert payload['verification']['reopened_in_fresh_orca_process'] is False
           project = base64.b64decode(payload['project']['base64'], validate=True)
           assert hashlib.sha256(project).hexdigest() == payload['project']['sha256']
+          assert payload['engine']['service_commit'] and len(payload['engine']['service_commit']) == 40
           Path('/tmp/workpiece-production.3mf').write_bytes(project)
+          receipt = {
+              'source': {'sha256': payload['source']['sha256']},
+              'printer': {
+                  'key': payload['printer']['key'],
+                  'temporary_generic': payload['printer']['temporary_generic'],
+              },
+              'profiles': payload['profiles'],
+              'engine': payload['engine'],
+              'project': {'sha256': payload['project']['sha256']},
+          }
+          Path('/tmp/generation-receipt.json').write_text(json.dumps(receipt, indent=2), encoding='utf-8')
           PY
           docker cp /tmp/workpiece-production.3mf workpiece-slicer:/tmp/workpiece-production.3mf
+          docker cp /tmp/generation-receipt.json workpiece-slicer:/tmp/generation-receipt.json
 
       - name: Slice exact retained 3MF through CP2 executor
         run: |
@@ -99,27 +113,25 @@ jobs:
 
           from app.fdm_exact_gcode import execute_exact_project_gcode
 
+          receipt = json.loads(Path('/tmp/generation-receipt.json').read_text(encoding='utf-8'))
           result = execute_exact_project_gcode(
               orca_bin=Path(os.environ['ORCA_BIN']),
               project_path=Path('/tmp/workpiece-production.3mf'),
               output_dir=Path('/tmp/cp2-exact-gcode'),
               timeout_seconds=300,
+              generation_receipt=receipt,
               base_env=os.environ,
           )
           summary = {
               'performed': result['performed'],
+              'authority_state': result['authority_state'],
               'reopened_exact_project': result['reopened_exact_project'],
               'fresh_runtime_state': result['fresh_runtime_state'],
               'project_sha256': result['project_sha256'],
               'plate_ids': result['plate_ids'],
+              'generation_receipt': result['generation_receipt'],
               'plates': [
-                  {
-                      'plate_id': plate['plate_id'],
-                      'filename': plate['filename'],
-                      'byte_count': plate['byte_count'],
-                      'sha256': plate['sha256'],
-                      'project_sha256': plate['project_sha256'],
-                  }
+                  {key: value for key, value in plate.items() if key != 'bytes'}
                   for plate in result['plates']
               ],
           }
@@ -140,9 +152,13 @@ jobs:
           project = json.load(open('/tmp/project.json', encoding='utf-8'))
           result = json.load(open('/tmp/cp2-result.json', encoding='utf-8'))
           assert result['performed'] is True
+          assert result['authority_state'] == 'evidence_candidate'
           assert result['reopened_exact_project'] is True
           assert result['fresh_runtime_state'] is True
           assert result['project_sha256'] == project['project']['sha256']
+          assert result['generation_receipt']['source']['sha256'] == project['source']['sha256']
+          assert result['generation_receipt']['engine']['service_commit'] == project['engine']['service_commit']
+          assert result['generation_receipt']['profiles'] == project['profiles']
 
           project_plates = project['project']['inspection']['plates']
           expected = sorted(int(plate['plater_id']) for plate in project_plates)
@@ -160,6 +176,14 @@ jobs:
               assert len(payload) == plate['byte_count']
               assert hashlib.sha256(payload).hexdigest() == plate['sha256']
               assert plate['project_sha256'] == result['project_sha256']
+              assert plate['source_sha256'] == project['source']['sha256']
+              assert plate['printer_key'] == project['printer']['key']
+              assert plate['profile_sha256'] == {
+                  kind: project['profiles'][kind]['sha256']
+                  for kind in ('machine', 'process', 'filament')
+              }
+              assert plate['orca_version'] == project['engine']['version']
+              assert plate['service_commit'] == project['engine']['service_commit']
           PY
 
       - name: Show service logs on failure
