@@ -124,6 +124,7 @@ jobs:
         run: |
           docker cp /tmp/cp3-production.3mf workpiece-slicer:/tmp/cp3-production.3mf
           docker cp /tmp/cp3-generation-receipt.json workpiece-slicer:/tmp/cp3-generation-receipt.json
+          set +e
           docker exec -i workpiece-slicer python - <<'PY'
           import json
           import os
@@ -169,8 +170,14 @@ jobs:
           assert all(item["motion"]["extrusionSegmentCount"] > 0 for item in validations)
           assert all(item["motion"]["extrusionBoundsMm"] for item in validations)
           PY
-          docker cp workpiece-slicer:/tmp/cp3-validation.json /tmp/cp3-validation.json
-          docker cp workpiece-slicer:/tmp/cp3-exact-gcode /tmp/cp3-exact-gcode
+          status=$?
+          set -e
+          docker cp workpiece-slicer:/tmp/cp3-validation.json /tmp/cp3-validation.json || true
+          docker cp workpiece-slicer:/tmp/cp3-exact-gcode /tmp/cp3-exact-gcode || true
+          if [ -f /tmp/cp3-validation.json ]; then
+            cat /tmp/cp3-validation.json
+          fi
+          exit "$status"
 
       - name: Re-hash retained CP3 evidence on host
         run: |
@@ -192,13 +199,14 @@ jobs:
           PY
 
       - name: Upload CP3 RatRig evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cp3-ratrig-authority-evidence
           path: |
             /tmp/cp3-validation.json
             /tmp/cp3-exact-gcode/*.gcode
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Show service logs on failure
