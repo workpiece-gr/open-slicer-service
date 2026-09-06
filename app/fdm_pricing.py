@@ -2,7 +2,8 @@
 
 CP7 prices exact retained manufacturing evidence. It does not call OrcaSlicer,
 change the production endpoint, apply the cart-level order minimum, qualify a
-printer, publish the CP5 runtime, or bypass human review.
+printer, publish the CP5 runtime, grant production permission, or bypass human
+review.
 
 The commercial price can be authoritative while manufacturing remains an
 ``evidence_candidate`` only when the remaining manufacturing blockers are the
@@ -23,6 +24,8 @@ from .fdm_authority import AUTHORITY_PRODUCTION, evaluate_fdm_authority
 
 FDM_PRICING_CONTRACT_VERSION = "fdm-pricing/1.0.0"
 FDM_PRICING_POLICY_VERSION = "workpiece-fdm-pricing-policy/1.0.0"
+FDM_PRICING_ENGINE_NAME = "workpiece-fdm-pricing"
+FDM_PRICING_ENGINE_VERSION = "1.0.0"
 
 # Mirrors the current Workpiece browser commercial policy at the start of CP7.
 # CP7 intentionally does NOT carry the browser-only manual-review complexity
@@ -64,6 +67,7 @@ _ALLOWED_MANUFACTURING_CANDIDATE_ISSUES = frozenset(
     {"missing_immutable_toolchain", "machine_not_production_ready"}
 )
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+_COMMIT_RE = re.compile(r"^[a-f0-9]{40}$")
 _SUPPORT_ROLE_RE = re.compile(r"support", re.IGNORECASE)
 _ZERO = Decimal("0")
 _HUNDRED = Decimal("100")
@@ -84,6 +88,13 @@ def _text(value: Any) -> str:
 def _sha(value: Any) -> str:
     text = _text(value).lower()
     return text if _SHA256_RE.fullmatch(text) else ""
+
+
+def _service_commit(value: Any) -> str:
+    text = _text(value).lower()
+    if not _COMMIT_RE.fullmatch(text):
+        raise FdmPricingError("Authoritative FDM pricing requires the exact 40-hex pricing service commit.")
+    return text
 
 
 def _digest(payload: bytes) -> str:
@@ -311,9 +322,11 @@ def price_exact_fdm_job(
     *,
     manifest: Mapping[str, Any] | Any,
     gcode_bytes_by_plate: Mapping[str, bytes] | Any,
+    pricing_service_commit: str,
 ) -> dict[str, Any]:
     """Calculate one authoritative FDM item subtotal from exact job evidence."""
 
+    service_commit = _service_commit(pricing_service_commit)
     if not isinstance(manifest, Mapping):
         raise FdmPricingError("CP7 requires an FDM production manifest object.")
     manufacturing_state, manufacturing_issues = _validate_manufacturing_evidence(manifest)
@@ -394,9 +407,14 @@ def price_exact_fdm_job(
     rounding_adjustment_cents = item_subtotal_cents - sum(component_cents.values())
 
     policy_sha = _digest(_canonical_json(FDM_PRICING_POLICY))
+    machine = _record(manifest.get("machine"))
+    toolchain = _record(manifest.get("toolchain"))
+    execution_environment = _record(toolchain.get("executionEnvironment"))
     evidence_binding = {
         "sourceSha256": _sha(_record(manifest.get("source")).get("sha256")),
         "projectSha256": _sha(_record(manifest.get("project")).get("sha256")),
+        "machineKey": _text(machine.get("key")),
+        "toolchainRef": _text(execution_environment.get("reference")),
         "profileSha256": {
             kind: _sha(_record(_record(manifest.get("profiles")).get(kind)).get("sha256"))
             for kind in ("machine", "process", "filament")
@@ -406,9 +424,15 @@ def price_exact_fdm_job(
             for plate in plates
         ],
     }
+    review = _record(manifest.get("review"))
 
     receipt = {
         "contractVersion": FDM_PRICING_CONTRACT_VERSION,
+        "pricingEngine": {
+            "name": FDM_PRICING_ENGINE_NAME,
+            "version": FDM_PRICING_ENGINE_VERSION,
+            "serviceCommit": service_commit,
+        },
         "policyVersion": FDM_PRICING_POLICY_VERSION,
         "policySha256": policy_sha,
         "currency": "EUR",
@@ -416,7 +440,15 @@ def price_exact_fdm_job(
         "authority": "server_exact_manufacturing_evidence",
         "manufacturingAuthorityState": manufacturing_state,
         "manufacturingAuthorityIssues": manufacturing_issues,
-        "productionOrderEligible": manufacturing_state == AUTHORITY_PRODUCTION,
+        "technicalProductionAuthority": manufacturing_state == AUTHORITY_PRODUCTION,
+        # CP7 owns price authority only. It never grants print/fulfilment
+        # permission; the separate human review gate must do that downstream.
+        "productionOrderEligible": False,
+        "productionEnablementPerformed": False,
+        "humanReview": {
+            "required": review.get("required") is True,
+            "status": _text(review.get("status")) or "unknown",
+        },
         "material": material,
         "quantity": quantity,
         "exactStatistics": {
