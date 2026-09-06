@@ -148,13 +148,7 @@ jobs:
                   for points in triangles:
                       handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
 
-          # A simple low box: automatic supports are enabled in the production
-          # profile, but the exact toolpath should contain no support extrusion.
           write_boxes("/tmp/cp7-flat.stl", [(0, 40, 0, 40, 0, 5)])
-
-          # Three intersecting orthogonal beams. Auto-orientation cannot put all
-          # three bars vertically at once; at least two arms remain substantial
-          # cantilevers. The 1 mm overlaps make the three shells one slicer volume.
           write_boxes(
               "/tmp/cp7-overhang.stl",
               [
@@ -220,7 +214,7 @@ jobs:
           docker cp tests/cp7_real_pricing_probe.py workpiece-cp7:/tmp/cp7_real_pricing_probe.py
 
           set +e
-          docker exec workpiece-cp7 python /tmp/cp7_real_pricing_probe.py \
+          docker exec -e PYTHONPATH=/app workpiece-cp7 python /tmp/cp7_real_pricing_probe.py \
             2>&1 | tee /tmp/cp7-evidence/cp7-probe.log
           status=${PIPESTATUS[0]}
           set -e
