@@ -164,6 +164,18 @@ def test_project_mismatch_fails_closed():
     assert_candidate_with(manifest, "plate_project_mismatch")
 
 
+def test_profile_identity_must_match_requested_configuration():
+    manifest = valid_manifest()
+    manifest["job"]["request"]["material"] = "abs"
+    assert_candidate_with(manifest, "profile_configuration_mismatch")
+
+
+def test_current_v2_policy_is_fail_closed_to_exact_automatic_path():
+    manifest = valid_manifest()
+    manifest["job"]["request"]["orientation"] = "browser_orientation"
+    assert_candidate_with(manifest, "unsupported_manufacturing_policy")
+
+
 def test_missing_profile_receipt_fails_closed():
     manifest = valid_manifest()
     del manifest["profiles"]["filament"]
