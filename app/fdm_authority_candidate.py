@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .fdm_authority import evaluate_fdm_authority
 from .fdm_authority_pipeline import FdmAuthorityPipelineError, build_fdm_authority_pipeline
@@ -59,9 +59,17 @@ def build_fdm_authority_candidate(
     toolchain_manifest_bytes: bytes,
     package_inventory_bytes: bytes,
     orca_runtime_bytes: bytes,
+    summarize_gcode: Callable[[Path], Mapping[str, Any]],
     base_env: Mapping[str, str],
 ) -> FdmAuthorityCandidateResult:
-    """Build one exact RatRig evidence candidate and authoritative item price."""
+    """Build one exact RatRig evidence candidate and authoritative item price.
+
+    ``summarize_gcode`` is retained in this candidate-wrapper interface for the
+    already-merged HTTP caller. The shared authority pipeline now extracts
+    authoritative statistics directly from exact retained G-code bytes instead.
+    """
+
+    del summarize_gcode
 
     if not source_path.is_file() or source_path.stat().st_size < 1:
         raise ValueError("Authority v2 requires the exact immutable source STL bytes.")
