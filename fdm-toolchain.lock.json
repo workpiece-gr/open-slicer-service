@@ -1,0 +1,21 @@
+{
+  "schema": "workpiece-fdm-toolchain-lock-v1",
+  "status": "unpublished",
+  "image": "ghcr.io/workpiece-gr/fdm-slicer-toolchain",
+  "digest": null,
+  "tag": "orca-2.4.2-noble-20260810-amd64",
+  "build_recipe": "Dockerfile.toolchain",
+  "service_recipe": "Dockerfile.authority",
+  "platform": "linux/amd64",
+  "base_image": {
+    "reference": "ubuntu:noble-20260810@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316"
+  },
+  "orca": {
+    "version": "2.4.2",
+    "asset": "OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage",
+    "asset_sha256": "d12fb8c8eac1aecd2dfb6377acd48f994f8fa439ed5292fa532dd82880f029fd",
+    "release_tag": "v2.4.2",
+    "release_asset_id": 468754790,
+    "runtime_path": "/opt/orca/squashfs-root/AppRun"
+  }
+}
