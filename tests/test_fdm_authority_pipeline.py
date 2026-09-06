@@ -56,17 +56,47 @@ def test_pipeline_does_not_invent_machine_qualification_evidence(tmp_path: Path,
         )
 
 
-def test_pipeline_requires_exact_simple_source_filename(tmp_path: Path):
+def test_pipeline_requires_exact_simple_stl_source_filename(tmp_path: Path):
     project = tmp_path / "retained.3mf"
     project.write_bytes(b"project")
+    common = {
+        "orca_bin": tmp_path / "orca",
+        "source_bytes": b"immutable-source",
+        "project_path": project,
+        "generation_receipt": {},
+        "profile_bytes": {"machine": b"m", "process": b"p", "filament": b"f"},
+        "toolchain_receipt": {},
+        "toolchain_lock_bytes": b"lock",
+        "toolchain_manifest_bytes": b"manifest",
+        "package_inventory_bytes": b"packages",
+        "output_dir": tmp_path / "gcode",
+        "material": "pla",
+        "quality": "balanced",
+        "strength": "functional",
+        "quantity": 1,
+        "printer_key": "ratrig_vcore3_300",
+        "machine_production_ready": False,
+        "machine_qualification_evidence_id": "candidate-evidence-reference",
+        "validator_service_commit": "a" * 40,
+        "pricing_service_commit": "a" * 40,
+    }
     with pytest.raises(FdmAuthorityPipelineError, match="simple retained filename"):
+        build_fdm_authority_pipeline(source_filename="../source.stl", **common)
+    with pytest.raises(FdmAuthorityPipelineError, match="must be an STL"):
+        build_fdm_authority_pipeline(source_filename="source.obj", **common)
+
+
+def test_pipeline_rejects_malformed_profile_byte_mapping_before_authority_work(tmp_path: Path):
+    project = tmp_path / "retained.3mf"
+    project.write_bytes(b"project")
+    with pytest.raises(FdmAuthorityPipelineError, match="profile byte mappings"):
         build_fdm_authority_pipeline(
             orca_bin=tmp_path / "orca",
             source_bytes=b"immutable-source",
-            source_filename="../source.stl",
+            source_filename="source-original.stl",
             project_path=project,
             generation_receipt={},
-            profile_bytes={"machine": b"m", "process": b"p", "filament": b"f"},
+            profile_bytes=None,  # type: ignore[arg-type]
             toolchain_receipt={},
             toolchain_lock_bytes=b"lock",
             toolchain_manifest_bytes=b"manifest",
