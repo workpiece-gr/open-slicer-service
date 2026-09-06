@@ -56,6 +56,8 @@ def receipt_and_artifact(gcode: bytes):
         "source_sha256": "1" * 64,
         "printer_key": "ratrig_vcore3_300",
         "profile_sha256": {kind: value["sha256"] for kind, value in profiles.items()},
+        "orca_version": "2.4.2",
+        "service_commit": "4" * 40,
     }
     return machine, filament, generation, artifact
 
@@ -102,6 +104,7 @@ def test_independent_validator_passes_exact_profile_bound_gcode():
     assert result["motion"]["extrusionBoundsMm"] == {"min": [10.0, 10.0, 0.2], "max": [30.0, 30.0, 0.2]}
     assert result["temperatures"]["nozzleTargetsC"] == [220.0, 220.0]
     assert result["temperatures"]["bedTargetsC"] == [60.0]
+    assert result["observedMacros"] == ["END_PRINT", "START_PRINT", "TIMELAPSE_TAKE_FRAME"]
 
 
 def test_gcode_bytes_must_match_cp2_sha_receipt():
@@ -131,6 +134,23 @@ def test_exact_machine_and_filament_profile_bytes_are_hash_bound():
     )
     assert result["passed"] is False
     assert "machine_profile_bytes_mismatch" in issue_codes(result)
+
+
+def test_cp2_source_orca_and_service_provenance_must_match():
+    machine, filament, generation, artifact = receipt_and_artifact(good_gcode())
+    artifact["source_sha256"] = "f" * 64
+    artifact["orca_version"] = "0.0.0"
+    artifact["service_commit"] = "e" * 40
+    result = validate_exact_gcode(
+        artifact=artifact,
+        generation_receipt=generation,
+        machine_profile_bytes=machine,
+        filament_profile_bytes=filament,
+        validator_service_commit="a" * 40,
+        toolchain_ref="runtime-ref",
+    )
+    assert result["passed"] is False
+    assert {"source_sha256_mismatch", "orca_version_mismatch", "service_commit_mismatch"} <= issue_codes(result)
 
 
 def test_extrusion_outside_profile_envelope_fails_closed():
