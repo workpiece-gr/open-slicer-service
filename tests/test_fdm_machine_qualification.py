@@ -24,8 +24,8 @@ def fixture():
         "protocolId": "synthetic-policy-boundary-v1",
         "printerKey": "ratrig_vcore3_300",
         "productionReady": True,
-        "request": request,
-        "profileSha256": profiles,
+        "request": dict(request),
+        "profileSha256": dict(profiles),
         "evidence": {
             "filename": "synthetic-qualification-report.txt",
             "mediaType": "text/plain",
