@@ -1,0 +1,31 @@
+name: Temporary CP6 qualification semantic hardening
+
+on:
+  push:
+    branches:
+      - chris/fdm-v2-machine-qualification-receipt
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply CP6 semantic verification patch
+        run: python scripts/harden_cp6_qualification_semantics.py
+      - name: Remove temporary patch tooling
+        run: |
+          git rm scripts/harden_cp6_qualification_semantics.py
+          git rm .github/workflows/temp-cp6-qualification-semantics.yml
+      - name: Commit hardened bundle verification
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app tests docs
+          git commit -m "Harden CP6 machine qualification verification"
+          git push
