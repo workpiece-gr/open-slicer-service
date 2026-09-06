@@ -175,10 +175,14 @@ def build_fdm_authority_pipeline(
         raise FdmAuthorityPipelineError("The immutable source must contain exact non-empty bytes.")
     if not source_filename or Path(source_filename).name != source_filename:
         raise FdmAuthorityPipelineError("The immutable source filename must be a simple retained filename.")
+    if Path(source_filename).suffix.lower() != ".stl":
+        raise FdmAuthorityPipelineError("The current FDM Authority v2 immutable source must be an STL file.")
     if not project_path.is_file() or project_path.stat().st_size < 1:
         raise FdmAuthorityPipelineError("The exact retained production 3MF is missing or empty.")
     if not isinstance(generation_receipt, Mapping) or not isinstance(toolchain_receipt, Mapping):
         raise FdmAuthorityPipelineError("Generation and CP5 toolchain receipts are required.")
+    if not isinstance(profile_bytes, Mapping):
+        raise FdmAuthorityPipelineError("Exact machine, process, and filament profile byte mappings are required.")
     quantity = _positive_int(quantity, "FDM quantity")
     material = _text(material).lower()
     quality = _text(quality).lower()
@@ -205,8 +209,8 @@ def build_fdm_authority_pipeline(
     if _text(generation_printer.get("key")) != printer_key:
         raise FdmAuthorityPipelineError("Requested printer differs from the retained generation receipt.")
 
+    profile_hashes = _verify_profile_bytes(generation_receipt, profile_bytes)
     normalized_profiles = {kind: bytes(profile_bytes[kind]) for kind in ("machine", "process", "filament")}
-    profile_hashes = _verify_profile_bytes(generation_receipt, normalized_profiles)
     runtime_ref = _text(_record(toolchain_receipt.get("executionEnvironment")).get("reference"))
     if not runtime_ref:
         raise FdmAuthorityPipelineError("The CP5 toolchain receipt lacks an execution-environment reference.")
