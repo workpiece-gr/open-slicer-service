@@ -291,7 +291,7 @@ def test_physical_qualification_can_remain_separate_from_authoritative_price():
 def test_per_plate_statistics_must_reconcile_before_commercial_math():
     manifest, gcodes = manifest_fixture()
     manifest["plates"][0]["statistics"]["filamentGrams"] = 99.0
-    with pytest.raises(FdmPricingError, match="filament totals"):
+    with pytest.raises(FdmPricingError, match="incomplete_or_mismatched_totals"):
         price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
 
 
