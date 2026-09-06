@@ -35,24 +35,33 @@ started. All of these independent gates must be satisfied:
    the reviewed published toolchain digest.
 3. Exact retained toolchain manifest, package inventory and Orca runtime bytes
    validate against CP5.
-4. A real, non-empty RatRig machine/profile qualification evidence identifier
-   is supplied through configuration.
-5. The exact RatRig profile is selected; temporary/generic printer profiles are
+4. A real RatRig machine/profile qualification is represented by an exact
+   canonical `fdm-machine-qualification/1.0.0` receipt plus the exact physical-
+   evidence artifact hashed by that receipt.
+5. That receipt binds the selected RatRig, material/quality/strength request and
+   exact machine/process/filament profile SHA-256 values, and retains an approved
+   human qualification-review declaration.
+6. The exact RatRig profile is selected; temporary/generic printer profiles are
    rejected.
-6. The shared CP2→CP7 pipeline closes every technical authority issue and CP6
-   produces a production-authoritative deterministic bundle.
+7. The shared CP2→CP7 pipeline closes every technical authority issue and CP6
+   produces a production-authoritative deterministic bundle containing both
+   qualification files as retained evidence.
 
 The repository's current committed toolchain lock is intentionally
 `unpublished`, so the production app is expected to report that its production
 preconditions are incomplete. Do not change that status or add a digest until
 the real immutable image has been published and reviewed.
 
-Likewise, production machine qualification now requires two exact retained files: a canonical `fdm-machine-qualification/1.0.0` receipt and the physical-evidence artifact hashed by that receipt. The receipt binds the RatRig, material/quality/strength selection, exact machine/process/filament profile SHA-256 values, qualification protocol/review metadata, and evidence SHA/byte count. A free-form evidence ID is not sufficient and must never be invented to make software authority pass.
+A free-form qualification ID is no longer sufficient. Software verifies the
+receipt/evidence bytes and their configuration bindings, but it does not perform
+the physical qualification itself or invent its measurements, acceptance
+criteria, reviewer, or result.
 
 Current production qualification configuration:
 
-- `FDM_MACHINE_QUALIFICATION_RECEIPT` (path to the exact canonical receipt JSON)
-- `FDM_MACHINE_QUALIFICATION_EVIDENCE` (path to the exact physical-evidence artifact referenced by the receipt)
+- `FDM_MACHINE_QUALIFICATION_RECEIPT` — path to the exact canonical receipt JSON;
+- `FDM_MACHINE_QUALIFICATION_EVIDENCE` — path to the exact physical-evidence
+  artifact referenced by the receipt.
 
 ## Human review remains separate
 
@@ -62,10 +71,12 @@ Successful technical production authority still returns:
 - `productionEnablementPerformed: false`
 - human review required with status `pending`
 
-The FDM pricing checkpoint owns authoritative price, not fulfilment permission.
-The Workpiece website must independently re-verify the stored authority package
-and record the required human review before an order can become eligible for
-payment/production.
+The machine-qualification review and the per-order manufacturing review are
+separate gates. A prior physical-machine qualification cannot approve a customer
+order. The FDM pricing checkpoint owns authoritative price, not fulfilment
+permission. The Workpiece website must independently re-verify the stored
+authority package and record the required per-order human review before an order
+can become eligible for payment/production.
 
 ## Current validation strategy
 
@@ -74,7 +85,11 @@ operational gates, CI does **not** fake a successful real production HTTP run.
 Instead it proves:
 
 - the actual current unpublished lock fails before the shared authority pipeline;
-- missing machine qualification evidence fails immediately;
+- a bare qualification identifier or missing receipt/evidence bytes cannot grant
+  production authority;
+- receipt/request/profile/evidence drift fails closed;
+- CP6 retains and independently re-hashes the exact qualification receipt and
+  physical-evidence artifact for production-authoritative bundles;
 - the production policy requires published CP5 provenance and full technical
   production authority;
 - pricing cannot grant production/order permission;
