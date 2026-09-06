@@ -32,6 +32,7 @@ def process_job(name: str, *, expect_support: bool) -> dict:
     generation = load_json(generation_path)
     toolchain = load_json(toolchain_path)
     runtime_ref = toolchain["executionEnvironment"]["reference"]
+    pricing_service_commit = os.environ["SOURCE_COMMIT_SHA"]
 
     exact_dir = Path(f"/tmp/cp7-{name}-exact-gcode")
     exact = execute_exact_project_gcode(
@@ -201,12 +202,20 @@ def process_job(name: str, *, expect_support: bool) -> dict:
     assert evaluation.state == "evidence_candidate"
     assert issue_codes == EXPECTED_CANDIDATE_ISSUES, issue_codes
 
-    receipt = price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcode_bytes_by_plate)
+    receipt = price_exact_fdm_job(
+        manifest=manifest,
+        gcode_bytes_by_plate=gcode_bytes_by_plate,
+        pricing_service_commit=pricing_service_commit,
+    )
     assert receipt["priceAuthoritative"] is True
     assert receipt["authority"] == "server_exact_manufacturing_evidence"
+    assert receipt["pricingEngine"]["serviceCommit"] == pricing_service_commit.lower()
     assert receipt["manufacturingAuthorityState"] == "evidence_candidate"
     assert set(receipt["manufacturingAuthorityIssues"]) == EXPECTED_CANDIDATE_ISSUES
+    assert receipt["technicalProductionAuthority"] is False
     assert receipt["productionOrderEligible"] is False
+    assert receipt["productionEnablementPerformed"] is False
+    assert receipt["humanReview"] == {"required": True, "status": "pending"}
     assert receipt["support"]["used"] is expect_support
     if expect_support:
         assert receipt["support"]["supportExtrusionSegmentCount"] > 0
@@ -225,6 +234,7 @@ def process_job(name: str, *, expect_support: bool) -> dict:
         "filamentGrams": receipt["exactStatistics"]["filamentGrams"],
         "printTimeSeconds": receipt["exactStatistics"]["printTimeSeconds"],
         "pricingReceiptSha256": receipt["pricingReceiptSha256"],
+        "pricingServiceCommit": receipt["pricingEngine"]["serviceCommit"],
         "manufacturingAuthorityIssues": receipt["manufacturingAuthorityIssues"],
     }
 
