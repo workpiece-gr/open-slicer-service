@@ -1,0 +1,239 @@
+name: FDM Authority v2 candidate API
+
+on:
+  pull_request:
+    paths:
+      - "app/authority_candidate_api.py"
+      - "app/fdm_authority_candidate.py"
+      - "app/fdm_authority.py"
+      - "app/fdm_exact_gcode.py"
+      - "app/fdm_gcode_validator.py"
+      - "app/fdm_profile_driven_gcode.py"
+      - "app/fdm_instance_plate_evidence.py"
+      - "app/fdm_toolchain_provenance.py"
+      - "app/fdm_production_bundle.py"
+      - "app/fdm_pricing.py"
+      - "tests/test_fdm_authority_candidate_api.py"
+      - "Dockerfile.toolchain"
+      - "Dockerfile.authority"
+      - "fdm-toolchain.lock.json"
+      - "profiles/**"
+      - ".github/workflows/authority-v2-candidate-api.yml"
+  push:
+    branches:
+      - "chris/fdm-v2-authority-candidate-api"
+    paths:
+      - "app/authority_candidate_api.py"
+      - "app/fdm_authority_candidate.py"
+      - "tests/test_fdm_authority_candidate_api.py"
+      - ".github/workflows/authority-v2-candidate-api.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ratrig-candidate-api:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build pinned toolchain candidate
+        run: docker build -f Dockerfile.toolchain -t workpiece-fdm-toolchain:authority-v2 .
+
+      - name: Build authority image candidate
+        run: |
+          docker build \
+            -f Dockerfile.authority \
+            --build-arg TOOLCHAIN_IMAGE=workpiece-fdm-toolchain:authority-v2 \
+            -t workpiece-fdm-authority:authority-v2 \
+            .
+
+      - name: Capture exact local image digest references
+        run: |
+          set -euo pipefail
+          toolchain_id=$(docker image inspect --format '{{.Id}}' workpiece-fdm-toolchain:authority-v2)
+          runtime_id=$(docker image inspect --format '{{.Id}}' workpiece-fdm-authority:authority-v2)
+          test "${toolchain_id#sha256:}" != "$toolchain_id"
+          test "${runtime_id#sha256:}" != "$runtime_id"
+          echo "TOOLCHAIN_REF=workpiece-fdm-toolchain:authority-v2@${toolchain_id}" >> "$GITHUB_ENV"
+          echo "RUNTIME_REF=workpiece-fdm-authority:authority-v2@${runtime_id}" >> "$GITHUB_ENV"
+
+      - name: Start separate candidate API entrypoint
+        run: |
+          docker run -d --name workpiece-authority-v2 -p 8081:8080 \
+            -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
+            -e ENABLE_FDM_AUTHORITY_V2_API=1 \
+            -e WORKPIECE_FDM_AUTHORITY_V2_TOKEN=ci-authority-v2-token \
+            -e WORKPIECE_FDM_AUTHORITY_RUNTIME_REF=${RUNTIME_REF} \
+            -e WORKPIECE_FDM_TOOLCHAIN_IMAGE_REF=${TOOLCHAIN_REF} \
+            -e FDM_AUTHORITY_V2_QUEUE_TIMEOUT_SECONDS=30 \
+            workpiece-fdm-authority:authority-v2 \
+            uvicorn app.authority_candidate_api:app --host 0.0.0.0 --port 8080 --workers 1
+
+      - name: Wait for candidate health
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8081/health -o /tmp/authority-v2-health.json; then
+              python3 - <<'PY'
+          import json
+          from pathlib import Path
+          payload=json.loads(Path('/tmp/authority-v2-health.json').read_text())
+          assert payload['ok'] is True, payload
+          assert payload['candidateOnly'] is True
+          assert payload['productionEnablementPerformed'] is False
+          assert payload['config']['runtime_digest_ref'] is True
+          assert payload['config']['toolchain_digest_ref'] is True
+          PY
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs workpiece-authority-v2
+          exit 1
+
+      - name: Generate benign RatRig STL fixture
+        run: |
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          vertices=[
+              (0,0,0),(20,0,0),(20,20,0),(0,20,0),
+              (0,0,10),(20,0,10),(20,20,10),(0,20,10),
+          ]
+          faces=[
+              (0,2,1),(0,3,2),(4,5,6),(4,6,7),
+              (0,1,5),(0,5,4),(1,2,6),(1,6,5),
+              (2,3,7),(2,7,6),(3,0,4),(3,4,7),
+          ]
+          path=Path('/tmp/authority-v2-box.stl')
+          with path.open('wb') as handle:
+              handle.write(b'Workpiece Authority v2 benign box'.ljust(80,b'\0'))
+              handle.write(struct.pack('<I',len(faces)))
+              for face in faces:
+                  points=[vertices[index] for index in face]
+                  handle.write(struct.pack('<12fH',0,0,1,*points[0],*points[1],*points[2],0))
+          PY
+
+      - name: Verify auth and RatRig-only fail-closed routing
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --output /tmp/authority-v2-unauth.json --write-out '%{http_code}' \
+            -F file=@/tmp/authority-v2-box.stl \
+            http://127.0.0.1:8081/v2/authority-candidate)
+          test "$status" = "401"
+
+          status=$(curl --silent --output /tmp/authority-v2-ender.json --write-out '%{http_code}' \
+            -H 'Authorization: Bearer ci-authority-v2-token' \
+            -F file=@/tmp/authority-v2-box.stl \
+            -F printer=ender3_generic_235 \
+            http://127.0.0.1:8081/v2/authority-candidate)
+          test "$status" = "422"
+          grep -q 'temporary/generic Ender authority is intentionally blocked' /tmp/authority-v2-ender.json
+
+      - name: Build real CP2-through-CP7 authority candidate over HTTP
+        run: |
+          curl --fail-with-body --max-time 300 \
+            -H 'Authorization: Bearer ci-authority-v2-token' \
+            -F file=@/tmp/authority-v2-box.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=1 \
+            -F printer=ratrig_vcore3_300 \
+            http://127.0.0.1:8081/v2/authority-candidate \
+            -o /tmp/authority-v2-response.json
+
+      - name: Independently verify candidate response and deterministic bundle
+        env:
+          EXPECTED_SERVICE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import io
+          import json
+          import os
+          import zipfile
+          from pathlib import Path
+
+          payload=json.loads(Path('/tmp/authority-v2-response.json').read_text())
+          assert payload['contractVersion']=='fdm-authority-candidate/1.0.0'
+          assert payload['candidateOnly'] is True
+          assert payload['authorityState']=='evidence_candidate'
+          assert set(payload['authorityIssues'])=={'machine_not_production_ready','missing_immutable_toolchain'}
+          assert payload['technicalProductionAuthority'] is False
+          assert payload['productionOrderEligible'] is False
+          assert payload['productionEnablementPerformed'] is False
+          assert payload['humanReview']=={'required':True,'status':'pending'}
+          assert payload['project']['instanceCount']==1
+          assert payload['project']['plateCount']>=1
+
+          pricing=payload['pricing']
+          assert pricing['priceAuthoritative'] is True
+          assert pricing['authoritativePriceCents']>0
+          assert pricing['manufacturingAuthorityState']=='evidence_candidate'
+          assert set(pricing['manufacturingAuthorityIssues'])==set(payload['authorityIssues'])
+          assert pricing['technicalProductionAuthority'] is False
+          assert pricing['productionOrderEligible'] is False
+          assert pricing['productionEnablementPerformed'] is False
+          assert pricing['humanReview']=={'required':True,'status':'pending'}
+          assert pricing['pricingEngine']['serviceCommit']==os.environ['EXPECTED_SERVICE_COMMIT'].lower()
+
+          bundle=base64.b64decode(payload['bundle']['base64'],validate=True)
+          assert len(bundle)==payload['bundle']['bytes']
+          assert hashlib.sha256(bundle).hexdigest()==payload['bundle']['sha256']
+          with zipfile.ZipFile(io.BytesIO(bundle),'r') as archive:
+              names=archive.namelist()
+              assert len(names)==len(set(names))==payload['bundle']['memberCount']
+              assert names[-2:]==['manifest.json','bundle-index.json']
+              assert all(item.date_time==(1980,1,1,0,0,0) for item in archive.infolist())
+              assert all(item.compress_type==zipfile.ZIP_STORED for item in archive.infolist())
+              index=json.loads(archive.read('bundle-index.json'))
+              for member in index['members']:
+                  data=archive.read(member['path'])
+                  assert len(data)==member['bytes']
+                  assert hashlib.sha256(data).hexdigest()==member['sha256']
+              assert any(name.endswith('.gcode') for name in names)
+
+          Path('/tmp/authority-v2-bundle.zip').write_bytes(bundle)
+          Path('/tmp/authority-v2-pricing.json').write_text(json.dumps(pricing,indent=2)+'\n')
+          Path('/tmp/authority-v2-manifest.json').write_text(json.dumps(payload['manifest'],indent=2)+'\n')
+          report={
+              'authorityState':payload['authorityState'],
+              'authorityIssues':payload['authorityIssues'],
+              'priceCents':pricing['authoritativePriceCents'],
+              'supportUsed':pricing['support']['used'],
+              'bundleSha256':payload['bundle']['sha256'],
+              'bundleBytes':payload['bundle']['bytes'],
+              'bundleMemberCount':payload['bundle']['memberCount'],
+              'pricingReceiptSha256':pricing['pricingReceiptSha256'],
+              'productionEnablementPerformed':False,
+              'physicalQualificationPerformed':False,
+              'toolchainPublicationPerformed':False,
+          }
+          Path('/tmp/authority-v2-report.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report,indent=2))
+          PY
+
+      - name: Upload Authority v2 candidate API evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fdm-authority-v2-candidate-api
+          path: |
+            /tmp/authority-v2-health.json
+            /tmp/authority-v2-report.json
+            /tmp/authority-v2-pricing.json
+            /tmp/authority-v2-manifest.json
+            /tmp/authority-v2-bundle.zip
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show candidate service logs on failure
+        if: failure()
+        run: docker logs workpiece-authority-v2 || true
