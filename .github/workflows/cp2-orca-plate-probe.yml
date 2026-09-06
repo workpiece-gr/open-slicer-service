@@ -61,7 +61,7 @@ jobs:
                   handle.write(struct.pack('<12fH', 0, 0, 1, *points[0], *points[1], *points[2], 0))
           PY
 
-      - name: Prove 3MF plate ids map to Orca G-code filenames
+      - name: Generate exact retained 3MF without legacy verification slice
         run: |
           curl --fail-with-body --max-time 300 \
             -H 'Authorization: Bearer ci-project-token' \
@@ -71,32 +71,95 @@ jobs:
             -F strength=functional \
             -F quantity=12 \
             -F printer=auto \
-            -F verify=true \
+            -F verify=false \
             -F response_mode=json \
             http://127.0.0.1:8080/v1/project \
             -o /tmp/project.json
           python - <<'PY'
+          import base64
+          import hashlib
           import json
-          import re
+          from pathlib import Path
 
           payload = json.load(open('/tmp/project.json', encoding='utf-8'))
-          project_plates = payload['project']['inspection']['plates']
-          verification = payload['verification']
-          assert verification['reopened_in_fresh_orca_process'] is True
-          assert len(project_plates) > 1
-          expected = sorted(int(plate['plater_id']) for plate in project_plates)
-          assert all(int(plate['model_instance_count']) > 0 for plate in project_plates)
+          assert payload['verification']['performed'] is False
+          assert payload['verification']['reopened_in_fresh_orca_process'] is False
+          project = base64.b64decode(payload['project']['base64'], validate=True)
+          assert hashlib.sha256(project).hexdigest() == payload['project']['sha256']
+          Path('/tmp/workpiece-production.3mf').write_bytes(project)
+          PY
+          docker cp /tmp/workpiece-production.3mf workpiece-slicer:/tmp/workpiece-production.3mf
 
-          actual = []
-          for plate in verification['plates']:
+      - name: Slice exact retained 3MF through CP2 executor
+        run: |
+          docker exec -i workpiece-slicer python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_exact_gcode import execute_exact_project_gcode
+
+          result = execute_exact_project_gcode(
+              orca_bin=Path(os.environ['ORCA_BIN']),
+              project_path=Path('/tmp/workpiece-production.3mf'),
+              output_dir=Path('/tmp/cp2-exact-gcode'),
+              timeout_seconds=300,
+              base_env=os.environ,
+          )
+          summary = {
+              'performed': result['performed'],
+              'reopened_exact_project': result['reopened_exact_project'],
+              'fresh_runtime_state': result['fresh_runtime_state'],
+              'project_sha256': result['project_sha256'],
+              'plate_ids': result['plate_ids'],
+              'plates': [
+                  {
+                      'plate_id': plate['plate_id'],
+                      'filename': plate['filename'],
+                      'byte_count': plate['byte_count'],
+                      'sha256': plate['sha256'],
+                      'project_sha256': plate['project_sha256'],
+                  }
+                  for plate in result['plates']
+              ],
+          }
+          Path('/tmp/cp2-result.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
+          print(json.dumps(summary, indent=2))
+          PY
+          docker cp workpiece-slicer:/tmp/cp2-result.json /tmp/cp2-result.json
+          docker cp workpiece-slicer:/tmp/cp2-exact-gcode /tmp/cp2-exact-gcode
+
+      - name: Prove exact 3MF plate ids and retained G-code bytes agree
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import re
+          from pathlib import Path
+
+          project = json.load(open('/tmp/project.json', encoding='utf-8'))
+          result = json.load(open('/tmp/cp2-result.json', encoding='utf-8'))
+          assert result['performed'] is True
+          assert result['reopened_exact_project'] is True
+          assert result['fresh_runtime_state'] is True
+          assert result['project_sha256'] == project['project']['sha256']
+
+          project_plates = project['project']['inspection']['plates']
+          expected = sorted(int(plate['plater_id']) for plate in project_plates)
+          assert len(expected) > 1
+          assert all(int(plate['model_instance_count']) > 0 for plate in project_plates)
+          assert result['plate_ids'] == expected
+          assert [plate['plate_id'] for plate in result['plates']] == expected
+
+          for plate in result['plates']:
               match = re.fullmatch(r'plate_([1-9][0-9]*)\.gcode', plate['filename'])
-              assert match, f"noncanonical Orca G-code filename: {plate['filename']}"
-              actual.append(int(match.group(1)))
-              assert len(plate['gcode_sha256']) == 64
-          actual.sort()
-          assert actual == expected, {'expected_3mf_plate_ids': expected, 'gcode_plate_ids': actual}
-          assert verification['plate_count'] == len(expected)
-          print(json.dumps({'expected_3mf_plate_ids': expected, 'gcode_plate_ids': actual}, indent=2))
+              assert match and int(match.group(1)) == plate['plate_id']
+              retained = Path('/tmp/cp2-exact-gcode') / plate['filename']
+              payload = retained.read_bytes()
+              assert payload
+              assert len(payload) == plate['byte_count']
+              assert hashlib.sha256(payload).hexdigest() == plate['sha256']
+              assert plate['project_sha256'] == result['project_sha256']
           PY
 
       - name: Show service logs on failure
