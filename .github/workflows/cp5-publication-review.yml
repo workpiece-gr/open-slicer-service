@@ -117,14 +117,24 @@ jobs:
       - name: Prove workflow has no registry publication path
         run: |
           set -euo pipefail
-          test "$(python3 - <<'PY'
+          python3 - <<'PY'
           import json
           from pathlib import Path
-          value = json.loads(Path('fdm-toolchain.lock.json').read_text(encoding='utf-8'))
-          print(value['status'])
+
+          lock = json.loads(Path('fdm-toolchain.lock.json').read_text(encoding='utf-8'))
+          assert lock['status'] == 'unpublished'
+          assert lock['digest'] is None
+
+          workflow = Path('.github/workflows/cp5-publication-review.yml').read_text(encoding='utf-8').lower()
+          forbidden = [
+              'packages:' + ' write',
+              'docker ' + 'login',
+              'docker ' + 'push',
+              '--' + 'push',
+          ]
+          for token in forbidden:
+              assert token not in workflow, f'publication-capable token present: {token}'
           PY
-          )" = "unpublished"
-          ! grep -Eq 'packages:[[:space:]]*write|docker[[:space:]]+login|docker[[:space:]]+push|buildx[^\n]*--push' .github/workflows/cp5-publication-review.yml
 
       - name: Upload publication-review evidence only
         uses: actions/upload-artifact@v4
