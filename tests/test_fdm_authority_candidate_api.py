@@ -85,6 +85,12 @@ def test_candidate_orchestrator_rejects_profile_byte_drift_before_orca(tmp_path:
             "process": {"sha256": "0" * 64},
             "filament": {"sha256": "0" * 64},
         },
+        "request": {
+            "material": "pla",
+            "quality": "balanced",
+            "strength": "functional",
+            "quantity": 1,
+        },
     }
     with pytest.raises(ValueError, match="machine profile bytes"):
         build_fdm_authority_candidate(
