@@ -11,6 +11,7 @@ from app.fdm_authority import (
     evaluate_fdm_authority,
 )
 from app.fdm_instance_plate_evidence import INSTANCE_PLATE_EVIDENCE_VERSION
+from app.fdm_toolchain_provenance import FDM_TOOLCHAIN_LOCK_SCHEMA, FDM_TOOLCHAIN_PROVENANCE_VERSION
 
 
 SHA = {
@@ -66,10 +67,28 @@ def valid_manifest() -> dict:
             "filament": {"identity": "ratrig_vcore3_300:pla:filament", "sha256": SHA["filament"]},
         },
         "toolchain": {
+            "contractVersion": FDM_TOOLCHAIN_PROVENANCE_VERSION,
+            "authorityState": AUTHORITY_PRODUCTION,
+            "authorityCriticalComplete": True,
             "orcaVersion": "2.4.2",
             "orcaBinarySha256": SHA["orca"],
             "serviceCommit": "a" * 40,
             "executionEnvironment": {"reference": RUNTIME_REF, "digest": f"sha256:{SHA['runtime']}"},
+            "toolchainImage": {
+                "reference": "ghcr.io/workpiece-gr/fdm-slicer-toolchain@sha256:" + "b" * 64,
+                "digest": "sha256:" + "b" * 64,
+            },
+            "toolchainManifestSha256": "c" * 64,
+            "baseImage": {"reference": "ubuntu:noble-20260810@sha256:" + "d" * 64},
+            "upstreamOrca": {
+                "asset": "OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage",
+                "assetSha256": "e" * 64,
+                "releaseAssetId": 468754790,
+            },
+            "packageInventorySha256": "f" * 64,
+            "lockSchema": FDM_TOOLCHAIN_LOCK_SCHEMA,
+            "lockStatus": "published",
+            "lockSha256": "0" * 64,
         },
         "project": {
             "filename": "workpiece-production.3mf",
@@ -240,6 +259,32 @@ def test_missing_profile_receipt_fails_closed():
 def test_missing_digest_pinned_toolchain_fails_closed():
     manifest = valid_manifest()
     manifest["toolchain"]["executionEnvironment"]["reference"] = "ghcr.io/workpiece-gr/open-slicer-service:latest"
+    assert_candidate_with(manifest, "missing_immutable_toolchain")
+
+
+def test_cp5_candidate_toolchain_cannot_self_grant_production_authority():
+    manifest = valid_manifest()
+    manifest["toolchain"]["authorityState"] = AUTHORITY_EVIDENCE_CANDIDATE
+    manifest["toolchain"]["authorityCriticalComplete"] = False
+    assert_candidate_with(manifest, "missing_immutable_toolchain")
+
+
+def test_cp5_unpublished_lock_cannot_satisfy_production_authority():
+    manifest = valid_manifest()
+    manifest["toolchain"]["lockStatus"] = "unpublished"
+    assert_candidate_with(manifest, "missing_immutable_toolchain")
+
+
+def test_cp5_toolchain_image_digest_must_match_reference():
+    manifest = valid_manifest()
+    manifest["toolchain"]["toolchainImage"]["digest"] = "sha256:" + "c" * 64
+    assert_candidate_with(manifest, "missing_immutable_toolchain")
+
+
+def test_cp5_manifest_and_package_inventory_hashes_are_required():
+    manifest = valid_manifest()
+    manifest["toolchain"]["toolchainManifestSha256"] = ""
+    manifest["toolchain"]["packageInventorySha256"] = ""
     assert_candidate_with(manifest, "missing_immutable_toolchain")
 
 
