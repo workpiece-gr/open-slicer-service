@@ -189,8 +189,8 @@ def build_fdm_authority_pipeline(
     if not isinstance(machine_production_ready, bool):
         raise FdmAuthorityPipelineError("Machine production-ready state must be explicit boolean evidence.")
     qualification_evidence = _text(machine_qualification_evidence_id)
-    if machine_production_ready and not qualification_evidence:
-        raise FdmAuthorityPipelineError("A production-ready machine requires a qualification evidence id.")
+    if not qualification_evidence:
+        raise FdmAuthorityPipelineError("Machine qualification state requires an explicit evidence id, including non-production-ready evidence.")
     if not isinstance(require_production_authority, bool):
         raise FdmAuthorityPipelineError("Production-authority requirement must be an explicit boolean.")
     if not _text(review_status):
@@ -349,7 +349,7 @@ def build_fdm_authority_pipeline(
             "key": printer_key,
             "qualification": {
                 "productionReady": machine_production_ready,
-                "evidenceId": qualification_evidence or "not-qualified",
+                "evidenceId": qualification_evidence,
             },
         },
         "profiles": dict(exact["generation_receipt"]["profiles"]),
