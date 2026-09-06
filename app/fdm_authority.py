@@ -1,7 +1,7 @@
 """Fail-closed contract evaluator for the FDM Authority v2 evidence chain.
 
-CP1 defines relationships only. It does not call OrcaSlicer or change HTTP/runtime
-behaviour.
+The evaluator computes technical manufacturing authority from retained evidence.
+It never calls OrcaSlicer and it does not change HTTP/runtime behaviour.
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ import math
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+from .fdm_instance_plate_evidence import INSTANCE_PLATE_EVIDENCE_VERSION
 
 FDM_JOB_CONTRACT_VERSION = "fdm-job/2.0.0"
 FDM_PRODUCTION_MANIFEST_VERSION = "fdm-production-manifest/2.0.0"
@@ -120,6 +122,146 @@ def _valid_bounds(value: Any) -> bool:
         and float(a) <= float(b)
         for a, b in zip(low, high, strict=True)
     )
+
+
+def _same_transform(left: Any, right: Any) -> bool:
+    if not _valid_transform(left) or not _valid_transform(right):
+        return False
+    return all(math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=1e-9) for a, b in zip(left, right, strict=True))
+
+
+def _same_bounds(left: Any, right: Any) -> bool:
+    if not _valid_bounds(left) or not _valid_bounds(right):
+        return False
+    left_record, right_record = _record(left), _record(right)
+    return all(
+        math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=1e-9)
+        for key in ("min", "max")
+        for a, b in zip(left_record[key], right_record[key], strict=True)
+    )
+
+
+def _string_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    result = [_text(item) for item in value]
+    return result if all(result) else None
+
+
+def _evaluate_instance_plate_evidence(
+    *,
+    manifest: Mapping[str, Any],
+    source_sha: str,
+    machine_key: str,
+    project_sha: str,
+    profile_hashes: Mapping[str, str],
+    instances: Mapping[str, Mapping[str, Any]],
+    plates: Mapping[str, Mapping[str, Any]],
+    issues: list[AuthorityIssue],
+) -> None:
+    evidence = _record(manifest.get("instancePlateEvidence"))
+    path = "instancePlateEvidence"
+    if evidence.get("contractVersion") != INSTANCE_PLATE_EVIDENCE_VERSION:
+        _issue(
+            issues,
+            "missing_instance_plate_evidence",
+            f"{path}.contractVersion",
+            f"Exact CP4 instance/plate evidence with contract {INSTANCE_PLATE_EVIDENCE_VERSION} is required.",
+        )
+        return
+    if evidence.get("authorityState") != AUTHORITY_EVIDENCE_CANDIDATE:
+        _issue(issues, "invalid_instance_plate_evidence_state", f"{path}.authorityState", "CP4 evidence must remain evidence_candidate and cannot self-grant authority.")
+    if not project_sha or _sha(evidence.get("projectSha256")) != project_sha:
+        _issue(issues, "instance_plate_evidence_project_mismatch", f"{path}.projectSha256", "CP4 evidence must bind to the exact production 3MF.")
+    if not source_sha or _sha(evidence.get("sourceSha256")) != source_sha:
+        _issue(issues, "instance_plate_evidence_source_mismatch", f"{path}.sourceSha256", "CP4 evidence must bind to the immutable source.")
+    if not machine_key or _text(evidence.get("printerKey")) != machine_key:
+        _issue(issues, "instance_plate_evidence_machine_mismatch", f"{path}.printerKey", "CP4 evidence must bind to the selected machine.")
+    _profile_links(evidence.get("profileSha256"), profile_hashes, issues, f"{path}.profileSha256", "instance_plate_evidence_profile_mismatch")
+
+    evidence_instance_items = evidence.get("instances") if isinstance(evidence.get("instances"), list) else []
+    evidence_instances: dict[str, Mapping[str, Any]] = {}
+    for index, raw in enumerate(evidence_instance_items):
+        item = _record(raw)
+        instance_id = _text(item.get("id"))
+        if not instance_id or instance_id in evidence_instances:
+            _issue(issues, "invalid_instance_plate_evidence_instance", f"{path}.instances[{index}]", "CP4 instance evidence requires unique stable instance ids.")
+            continue
+        evidence_instances[instance_id] = item
+
+    if set(evidence_instances) != set(instances):
+        _issue(issues, "instance_plate_evidence_instance_set_mismatch", f"{path}.instances", "CP4 instance ids must exactly match manifest physical instances.")
+
+    evidence_plate_items = evidence.get("plates") if isinstance(evidence.get("plates"), list) else []
+    evidence_plates: dict[str, Mapping[str, Any]] = {}
+    for index, raw in enumerate(evidence_plate_items):
+        item = _record(raw)
+        plate_id = _text(item.get("id"))
+        if not plate_id or plate_id in evidence_plates:
+            _issue(issues, "invalid_instance_plate_evidence_plate", f"{path}.plates[{index}]", "CP4 plate evidence requires unique stable plate ids.")
+            continue
+        evidence_plates[plate_id] = item
+
+    if set(evidence_plates) != set(plates):
+        _issue(issues, "instance_plate_evidence_plate_set_mismatch", f"{path}.plates", "CP4 plate ids must exactly match manifest physical plates.")
+
+    for instance_id, manifest_instance in instances.items():
+        receipt = evidence_instances.get(instance_id)
+        if receipt is None:
+            continue
+        receipt_path = f"{path}.instances.{instance_id}"
+        if _text(receipt.get("objectId")) != _text(manifest_instance.get("objectId")):
+            _issue(issues, "instance_plate_evidence_instance_mismatch", f"{receipt_path}.objectId", "CP4 objectId must match the manifest instance.")
+        if _text(receipt.get("plateId")) != _text(manifest_instance.get("plateId")):
+            _issue(issues, "instance_plate_evidence_instance_mismatch", f"{receipt_path}.plateId", "CP4 plateId must match the manifest instance.")
+        if not _same_transform(receipt.get("transform"), manifest_instance.get("transform")):
+            _issue(issues, "instance_plate_evidence_transform_mismatch", f"{receipt_path}.transform", "CP4 exact 3MF transform must match the manifest instance.")
+        if not _same_bounds(receipt.get("boundsMm"), manifest_instance.get("boundsMm")):
+            _issue(issues, "instance_plate_evidence_bounds_mismatch", f"{receipt_path}.boundsMm", "CP4 physical bounds must match the manifest instance.")
+
+        gcode_evidence = _record(receipt.get("gcodeEvidence"))
+        object_name = _text(gcode_evidence.get("objectName"))
+        extrusion_count = _pos_int(gcode_evidence.get("extrusionSegmentCount"))
+        extrusion_bounds = gcode_evidence.get("extrusionBoundsMm")
+        gcode_sha = _sha(gcode_evidence.get("gcodeSha256"))
+        if not object_name or extrusion_count is None or not _valid_bounds(extrusion_bounds) or not gcode_sha:
+            _issue(
+                issues,
+                "instance_gcode_evidence_incomplete",
+                f"{receipt_path}.gcodeEvidence",
+                "Every CP4 instance requires one matched G-code object, positive extrusion, finite extrusion bounds, and exact G-code SHA-256.",
+            )
+        manifest_plate = plates.get(_text(manifest_instance.get("plateId")))
+        manifest_gcode_sha = _sha(_record(manifest_plate.get("gcode") if manifest_plate else {}).get("sha256"))
+        if not manifest_gcode_sha or gcode_sha != manifest_gcode_sha:
+            _issue(issues, "instance_gcode_evidence_mismatch", f"{receipt_path}.gcodeEvidence.gcodeSha256", "CP4 instance G-code evidence must bind to its exact manifest plate G-code.")
+
+    for plate_id, manifest_plate in plates.items():
+        receipt = evidence_plates.get(plate_id)
+        if receipt is None:
+            continue
+        receipt_path = f"{path}.plates.{plate_id}"
+        manifest_index = _pos_int(manifest_plate.get("index"))
+        if _pos_int(receipt.get("index")) != manifest_index:
+            _issue(issues, "instance_plate_evidence_plate_mismatch", f"{receipt_path}.index", "CP4 plate index must match the manifest plate.")
+        if not project_sha or _sha(receipt.get("projectSha256")) != project_sha:
+            _issue(issues, "instance_plate_evidence_plate_mismatch", f"{receipt_path}.projectSha256", "CP4 plate must bind to the exact production 3MF.")
+        manifest_gcode_sha = _sha(_record(manifest_plate.get("gcode")).get("sha256"))
+        if not manifest_gcode_sha or _sha(receipt.get("gcodeSha256")) != manifest_gcode_sha:
+            _issue(issues, "instance_plate_evidence_plate_gcode_mismatch", f"{receipt_path}.gcodeSha256", "CP4 plate must bind to the exact retained manifest G-code.")
+        if not manifest_gcode_sha or _sha(receipt.get("validationGcodeSha256")) != manifest_gcode_sha:
+            _issue(issues, "instance_plate_evidence_validation_mismatch", f"{receipt_path}.validationGcodeSha256", "CP4 plate must bind to the CP3 validation of the same exact G-code.")
+        receipt_members = _string_list(receipt.get("instanceIds"))
+        manifest_members = _string_list(manifest_plate.get("instanceIds"))
+        if receipt_members is None or manifest_members is None or receipt_members != manifest_members:
+            _issue(issues, "instance_plate_evidence_membership_mismatch", f"{receipt_path}.instanceIds", "CP4 plate membership must exactly match the manifest plate membership order.")
+        object_names = _string_list(receipt.get("objectNames"))
+        if object_names is None or receipt_members is None or len(object_names) != len(receipt_members) or len(set(object_names)) != len(object_names):
+            _issue(issues, "instance_plate_evidence_object_set_invalid", f"{receipt_path}.objectNames", "CP4 plate requires one unique G-code object name per physical instance.")
+
+    totals = _record(evidence.get("totals"))
+    if _pos_int(totals.get("instanceCount")) != len(instances) or _pos_int(totals.get("plateCount")) != len(plates):
+        _issue(issues, "instance_plate_evidence_totals_mismatch", f"{path}.totals", "CP4 evidence totals must exactly reconcile with manifest instances and plates.")
 
 
 def evaluate_fdm_authority(value: Mapping[str, Any] | Any) -> AuthorityEvaluation:
@@ -301,6 +443,17 @@ def evaluate_fdm_authority(value: Mapping[str, Any] | Any) -> AuthorityEvaluatio
             _issue(issues, "duplicate_instance_membership", f"instances.{instance_id}", f"Instance {instance_id} appears on more than one plate.")
         elif declared_plate != memberships[0]:
             _issue(issues, "instance_plate_mismatch", f"instances.{instance_id}.plateId", "Instance plateId disagrees with physical plate membership.")
+
+    _evaluate_instance_plate_evidence(
+        manifest=manifest,
+        source_sha=source_sha,
+        machine_key=machine_key,
+        project_sha=project_sha,
+        profile_hashes=profile_hashes,
+        instances=instances,
+        plates=plates,
+        issues=issues,
+    )
 
     totals = _record(manifest.get("totals"))
     total_filament = _pos_num(totals.get("filamentGrams"))
