@@ -15,6 +15,8 @@ from app.fdm_authority import (
 from app.fdm_instance_plate_evidence import INSTANCE_PLATE_EVIDENCE_VERSION
 from app.fdm_pricing import (
     FDM_PRICING_CONTRACT_VERSION,
+    FDM_PRICING_ENGINE_NAME,
+    FDM_PRICING_ENGINE_VERSION,
     FDM_PRICING_POLICY_VERSION,
     FdmPricingError,
     inspect_exact_gcode_support,
@@ -29,10 +31,19 @@ PROFILE_HASHES = {"machine": "3" * 64, "process": "4" * 64, "filament": "5" * 64
 ORCA_SHA = "8" * 64
 RUNTIME_SHA = "9" * 64
 RUNTIME_REF = f"ghcr.io/workpiece-gr/open-slicer-service@sha256:{RUNTIME_SHA}"
+PRICING_COMMIT = "b" * 40
 
 
 def sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def price(manifest: dict, gcodes: dict[str, bytes]) -> dict:
+    return price_exact_fdm_job(
+        manifest=manifest,
+        gcode_bytes_by_plate=gcodes,
+        pricing_service_commit=PRICING_COMMIT,
+    )
 
 
 def gcode(*, support: bool = False, support_comment_only: bool = False) -> bytes:
@@ -226,20 +237,36 @@ def test_support_requires_positive_extrusion_in_support_role_not_settings_or_com
 
 def test_standard_reference_case_matches_current_browser_formula_without_cart_minimum():
     manifest, gcodes = manifest_fixture()
-    result = price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
+    result = price(manifest, gcodes)
     assert result["contractVersion"] == FDM_PRICING_CONTRACT_VERSION
     assert result["policyVersion"] == FDM_PRICING_POLICY_VERSION
+    assert result["pricingEngine"] == {
+        "name": FDM_PRICING_ENGINE_NAME,
+        "version": FDM_PRICING_ENGINE_VERSION,
+        "serviceCommit": PRICING_COMMIT,
+    }
     assert result["priceAuthoritative"] is True
-    assert result["productionOrderEligible"] is True
+    assert result["technicalProductionAuthority"] is True
+    assert result["productionOrderEligible"] is False
+    assert result["productionEnablementPerformed"] is False
+    assert result["humanReview"] == {"required": True, "status": "pending"}
     assert result["support"]["used"] is False
     assert result["authoritativePriceCents"] == 1732
     assert result["orderMinimum"] == {"minimumOrderCents": 2000, "applied": False, "scope": "whole_cart_checkout"}
     assert result["policy"]["manualReviewMultiplierApplied"] is False
+    assert result["evidenceBinding"]["machineKey"] == "ratrig_vcore3_300"
+    assert result["evidenceBinding"]["toolchainRef"] == RUNTIME_REF
+
+
+def test_pricing_requires_exact_service_commit_provenance():
+    manifest, gcodes = manifest_fixture()
+    with pytest.raises(FdmPricingError, match="40-hex pricing service commit"):
+        price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes, pricing_service_commit="main")
 
 
 def test_real_support_extrusion_matches_current_support_formula():
     manifest, gcodes = manifest_fixture(support=True)
-    result = price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
+    result = price(manifest, gcodes)
     assert result["support"]["used"] is True
     assert result["authoritativePriceCents"] == 2136
     assert result["breakdownCents"]["supportHandling"] == 200
@@ -247,7 +274,7 @@ def test_real_support_extrusion_matches_current_support_formula():
 
 def test_exact_job_totals_are_not_multiplied_by_quantity_again():
     manifest, gcodes = manifest_fixture(quantity=5, filament_grams=500, print_seconds=7200)
-    result = price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
+    result = price(manifest, gcodes)
     assert result["quantity"] == 5
     assert result["exactStatistics"]["filamentGrams"] == "500.000000"
     assert result["policy"]["quantityDiscountFactor"] == "0.95"
@@ -260,7 +287,7 @@ def test_exact_job_totals_are_not_multiplied_by_quantity_again():
 )
 def test_current_workpiece_material_input_costs_are_server_policy(material, expected_cents):
     manifest, gcodes = manifest_fixture(material=material)
-    result = price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
+    result = price(manifest, gcodes)
     assert result["authoritativePriceCents"] == expected_cents
 
 
@@ -268,23 +295,24 @@ def test_gcode_byte_drift_fails_closed_before_pricing():
     manifest, gcodes = manifest_fixture()
     gcodes["plate-001"] += b"; drift\n"
     with pytest.raises(FdmPricingError, match="SHA-256"):
-        price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
+        price(manifest, gcodes)
 
 
 def test_unrelated_manufacturing_authority_failure_cannot_be_hidden_by_price_receipt():
     manifest, gcodes = manifest_fixture()
     manifest["plates"][0]["validation"]["passed"] = False
     with pytest.raises(FdmPricingError, match="complete exact manufacturing evidence"):
-        price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
+        price(manifest, gcodes)
 
 
 def test_physical_qualification_can_remain_separate_from_authoritative_price():
     manifest, gcodes = manifest_fixture()
     manifest["machine"]["qualification"]["productionReady"] = False
-    result = price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
+    result = price(manifest, gcodes)
     assert result["priceAuthoritative"] is True
     assert result["manufacturingAuthorityState"] == AUTHORITY_EVIDENCE_CANDIDATE
     assert result["manufacturingAuthorityIssues"] == ["machine_not_production_ready"]
+    assert result["technicalProductionAuthority"] is False
     assert result["productionOrderEligible"] is False
 
 
@@ -292,13 +320,13 @@ def test_per_plate_statistics_must_reconcile_before_commercial_math():
     manifest, gcodes = manifest_fixture()
     manifest["plates"][0]["statistics"]["filamentGrams"] = 99.0
     with pytest.raises(FdmPricingError, match="incomplete_or_mismatched_totals"):
-        price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
+        price(manifest, gcodes)
 
 
 def test_pricing_receipt_is_deterministic_for_identical_evidence():
     manifest, gcodes = manifest_fixture(support=True)
-    first = price_exact_fdm_job(manifest=manifest, gcode_bytes_by_plate=gcodes)
-    second = price_exact_fdm_job(manifest=copy.deepcopy(manifest), gcode_bytes_by_plate=dict(gcodes))
+    first = price(manifest, gcodes)
+    second = price(copy.deepcopy(manifest), dict(gcodes))
     assert first == second
     digest = first["pricingReceiptSha256"]
     unsigned = dict(first)
