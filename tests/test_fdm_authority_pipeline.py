@@ -27,10 +27,11 @@ def test_exact_gcode_statistics_fail_closed_when_incomplete_or_unreadable():
         parse_exact_gcode_statistics(b"\xff\xfe\xfd")
 
 
-def test_pipeline_does_not_invent_machine_qualification(tmp_path: Path):
+@pytest.mark.parametrize("production_ready", [False, True])
+def test_pipeline_does_not_invent_machine_qualification_evidence(tmp_path: Path, production_ready: bool):
     project = tmp_path / "retained.3mf"
     project.write_bytes(b"not-reached-because-qualification-fails-first")
-    with pytest.raises(FdmAuthorityPipelineError, match="qualification evidence id"):
+    with pytest.raises(FdmAuthorityPipelineError, match="qualification state requires an explicit evidence id"):
         build_fdm_authority_pipeline(
             orca_bin=tmp_path / "orca",
             source_bytes=b"immutable-source",
@@ -48,7 +49,7 @@ def test_pipeline_does_not_invent_machine_qualification(tmp_path: Path):
             strength="functional",
             quantity=1,
             printer_key="ratrig_vcore3_300",
-            machine_production_ready=True,
+            machine_production_ready=production_ready,
             machine_qualification_evidence_id="",
             validator_service_commit="a" * 40,
             pricing_service_commit="a" * 40,
@@ -77,7 +78,7 @@ def test_pipeline_requires_exact_simple_source_filename(tmp_path: Path):
             quantity=1,
             printer_key="ratrig_vcore3_300",
             machine_production_ready=False,
-            machine_qualification_evidence_id="not-qualified",
+            machine_qualification_evidence_id="candidate-evidence-reference",
             validator_service_commit="a" * 40,
             pricing_service_commit="a" * 40,
         )
