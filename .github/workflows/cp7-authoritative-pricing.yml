@@ -1,0 +1,285 @@
+name: FDM v2 CP7 authoritative pricing
+
+on:
+  pull_request:
+    paths:
+      - "app/fdm_pricing.py"
+      - "app/fdm_authority.py"
+      - "app/fdm_exact_gcode.py"
+      - "app/fdm_gcode_validator.py"
+      - "app/fdm_profile_driven_gcode.py"
+      - "app/fdm_instance_plate_evidence.py"
+      - "app/fdm_toolchain_provenance.py"
+      - "tests/test_fdm_pricing.py"
+      - "tests/cp7_real_pricing_probe.py"
+      - "Dockerfile.toolchain"
+      - "Dockerfile.authority"
+      - "fdm-toolchain.lock.json"
+      - "profiles/**"
+      - ".github/workflows/cp7-authoritative-pricing.yml"
+  push:
+    branches:
+      - main
+      - "chris/fdm-v2-cp7-server-authoritative-pricing"
+    paths:
+      - "app/fdm_pricing.py"
+      - "tests/test_fdm_pricing.py"
+      - "tests/cp7_real_pricing_probe.py"
+      - "Dockerfile.toolchain"
+      - "Dockerfile.authority"
+      - "fdm-toolchain.lock.json"
+      - "profiles/**"
+      - ".github/workflows/cp7-authoritative-pricing.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ratrig-authoritative-pricing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build pinned CP5 toolchain candidate
+        run: docker build -f Dockerfile.toolchain -t workpiece-fdm-toolchain:cp7 .
+
+      - name: Retain exact CP5 toolchain evidence
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cp7-evidence
+          container_id=$(docker create workpiece-fdm-toolchain:cp7)
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/opt/workpiece-toolchain/manifest.json" /tmp/cp7-evidence/toolchain-manifest.json
+          docker cp "$container_id:/opt/workpiece-toolchain/packages.txt" /tmp/cp7-evidence/packages.txt
+          docker cp "$container_id:/opt/orca/squashfs-root/AppRun" /tmp/cp7-evidence/orca-AppRun
+          docker rm "$container_id"
+          trap - EXIT
+          docker image inspect --format '{{.Id}}' workpiece-fdm-toolchain:cp7 > /tmp/cp7-evidence/toolchain-image-id.txt
+
+      - name: Build parallel authority service candidate
+        run: |
+          docker build \
+            -f Dockerfile.authority \
+            --build-arg TOOLCHAIN_IMAGE=workpiece-fdm-toolchain:cp7 \
+            -t workpiece-fdm-authority:cp7 \
+            .
+          docker image inspect --format '{{.Id}}' workpiece-fdm-authority:cp7 > /tmp/cp7-evidence/runtime-image-id.txt
+
+      - name: Build exact unpublished CP5 provenance receipt
+        env:
+          SOURCE_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_toolchain_provenance import build_toolchain_provenance
+
+          def local_ref(name: str, path: str) -> str:
+              image_id = Path(path).read_text(encoding="utf-8").strip().lower()
+              assert image_id.startswith("sha256:") and len(image_id) == 71
+              return f"{name}@{image_id}"
+
+          receipt = build_toolchain_provenance(
+              lock_bytes=Path("fdm-toolchain.lock.json").read_bytes(),
+              manifest_bytes=Path("/tmp/cp7-evidence/toolchain-manifest.json").read_bytes(),
+              orca_runtime_bytes=Path("/tmp/cp7-evidence/orca-AppRun").read_bytes(),
+              service_commit=os.environ["SOURCE_COMMIT_SHA"],
+              runtime_image_ref=local_ref("workpiece-fdm-authority:cp7", "/tmp/cp7-evidence/runtime-image-id.txt"),
+              require_published=False,
+              candidate_toolchain_image_ref=local_ref("workpiece-fdm-toolchain:cp7", "/tmp/cp7-evidence/toolchain-image-id.txt"),
+          )
+          assert receipt["authorityState"] == "evidence_candidate"
+          assert receipt["authorityCriticalComplete"] is False
+          assert receipt["lockStatus"] == "unpublished"
+          Path("/tmp/cp7-evidence/toolchain-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Start authority service candidate
+        run: |
+          docker run -d --name workpiece-cp7 -p 8080:8080 \
+            -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
+            -e ENABLE_EXPERIMENTAL_PROJECT_API=1 \
+            -e WORKPIECE_PROJECT_API_TOKEN=ci-project-token \
+            -e PROJECT_QUEUE_TIMEOUT_SECONDS=30 \
+            workpiece-fdm-authority:cp7
+
+      - name: Wait for health
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health >/tmp/cp7-evidence/health.json; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs workpiece-cp7
+          exit 1
+
+      - name: Generate support-free and support-forcing STL fixtures
+        run: |
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          FACES = [
+              (0,2,1),(0,3,2),(4,5,6),(4,6,7),
+              (0,1,5),(0,5,4),(1,2,6),(1,6,5),
+              (2,3,7),(2,7,6),(3,0,4),(3,4,7),
+          ]
+
+          def box_triangles(x0, x1, y0, y1, z0, z1):
+              vertices = [
+                  (x0,y0,z0),(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),
+                  (x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1),
+              ]
+              return [[vertices[index] for index in face] for face in FACES]
+
+          def write_boxes(path: str, boxes):
+              triangles = []
+              for box in boxes:
+                  triangles.extend(box_triangles(*box))
+              with Path(path).open("wb") as handle:
+                  handle.write(b"Workpiece CP7 real pricing fixture".ljust(80, b"\0"))
+                  handle.write(struct.pack("<I", len(triangles)))
+                  for points in triangles:
+                      handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
+
+          write_boxes("/tmp/cp7-flat.stl", [(0, 40, 0, 40, 0, 5)])
+          write_boxes(
+              "/tmp/cp7-overhang.stl",
+              [
+                  (0, 60, 25, 35, 25, 35),
+                  (25, 35, 0, 60, 25, 35),
+                  (25, 35, 25, 35, 0, 60),
+              ],
+          )
+          PY
+
+      - name: Generate exact production 3MFs
+        run: |
+          set -euo pipefail
+          for name in flat overhang; do
+            curl --fail-with-body --max-time 240 \
+              -H "Authorization: Bearer ci-project-token" \
+              -F "file=@/tmp/cp7-${name}.stl" \
+              -F material=pla \
+              -F quality=balanced \
+              -F strength=functional \
+              -F quantity=1 \
+              -F printer=ratrig_vcore3_300 \
+              -F verify=false \
+              http://127.0.0.1:8080/v1/project \
+              -o "/tmp/cp7-${name}-project.json"
+          done
+
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import json
+          from pathlib import Path
+
+          for name in ("flat", "overhang"):
+              payload = json.loads(Path(f"/tmp/cp7-{name}-project.json").read_text(encoding="utf-8"))
+              assert payload["printer"]["key"] == "ratrig_vcore3_300"
+              assert payload["printer"]["temporary_generic"] is False
+              assert payload["request"]["quantity"] == 1
+              inspection = payload["project"]["inspection"]
+              assert inspection["instance_count"] == 1
+              assert len(inspection["plates"]) == 1
+              project = base64.b64decode(payload["project"]["base64"], validate=True)
+              assert hashlib.sha256(project).hexdigest() == payload["project"]["sha256"]
+              Path(f"/tmp/cp7-{name}.3mf").write_bytes(project)
+              generation = {
+                  "source": {"sha256": payload["source"]["sha256"]},
+                  "printer": {"key": payload["printer"]["key"], "temporary_generic": payload["printer"]["temporary_generic"]},
+                  "profiles": payload["profiles"],
+                  "engine": payload["engine"],
+                  "project": {"sha256": payload["project"]["sha256"]},
+              }
+              Path(f"/tmp/cp7-{name}-generation.json").write_text(json.dumps(generation, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Execute CP2 through CP4 and prove CP7 pricing
+        run: |
+          for name in flat overhang; do
+            docker cp "/tmp/cp7-${name}.stl" "workpiece-cp7:/tmp/cp7-${name}.stl"
+            docker cp "/tmp/cp7-${name}.3mf" "workpiece-cp7:/tmp/cp7-${name}.3mf"
+            docker cp "/tmp/cp7-${name}-generation.json" "workpiece-cp7:/tmp/cp7-${name}-generation.json"
+          done
+          docker cp /tmp/cp7-evidence/toolchain-receipt.json workpiece-cp7:/tmp/cp7-toolchain-receipt.json
+          docker cp tests/cp7_real_pricing_probe.py workpiece-cp7:/tmp/cp7_real_pricing_probe.py
+
+          set +e
+          docker exec -e PYTHONPATH=/app workpiece-cp7 python /tmp/cp7_real_pricing_probe.py \
+            2>&1 | tee /tmp/cp7-evidence/cp7-probe.log
+          status=${PIPESTATUS[0]}
+          set -e
+          for name in flat overhang; do
+            docker cp "workpiece-cp7:/tmp/cp7-${name}-manifest.json" "/tmp/cp7-evidence/cp7-${name}-manifest.json" || true
+            docker cp "workpiece-cp7:/tmp/cp7-${name}-pricing.json" "/tmp/cp7-evidence/cp7-${name}-pricing.json" || true
+            docker cp "workpiece-cp7:/tmp/cp7-${name}-exact-gcode" "/tmp/cp7-${name}-exact-gcode" || true
+          done
+          docker cp workpiece-cp7:/tmp/cp7-report.json /tmp/cp7-evidence/cp7-report.json || true
+          if [ -f /tmp/cp7-evidence/cp7-report.json ]; then cat /tmp/cp7-evidence/cp7-report.json; fi
+          exit "$status"
+
+      - name: Independently re-hash pricing receipts and exact G-code on host
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          def canonical(value):
+              return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+
+          report = json.loads(Path("/tmp/cp7-evidence/cp7-report.json").read_text(encoding="utf-8"))
+          assert report["priceAuthorityProved"] is True
+          assert report["productionEnablementPerformed"] is False
+          assert report["physicalQualificationPerformed"] is False
+          assert report["toolchainPublicationPerformed"] is False
+          assert report["flat"]["supportUsed"] is False
+          assert report["overhang"]["supportUsed"] is True
+          assert report["overhang"]["supportExtrusionSegmentCount"] > 0
+
+          for name in ("flat", "overhang"):
+              manifest = json.loads(Path(f"/tmp/cp7-evidence/cp7-{name}-manifest.json").read_text(encoding="utf-8"))
+              receipt = json.loads(Path(f"/tmp/cp7-evidence/cp7-{name}-pricing.json").read_text(encoding="utf-8"))
+              digest = receipt.pop("pricingReceiptSha256")
+              assert hashlib.sha256(canonical(receipt)).hexdigest() == digest
+              assert digest == report[name]["pricingReceiptSha256"]
+              assert receipt["priceAuthoritative"] is True
+              assert receipt["productionOrderEligible"] is False
+              assert set(receipt["manufacturingAuthorityIssues"]) == {"machine_not_production_ready", "missing_immutable_toolchain"}
+              for plate in manifest["plates"]:
+                  gcode_path = Path(f"/tmp/cp7-{name}-exact-gcode") / plate["gcode"]["filename"]
+                  payload = gcode_path.read_bytes()
+                  assert len(payload) == plate["gcode"]["bytes"]
+                  assert hashlib.sha256(payload).hexdigest() == plate["gcode"]["sha256"]
+          PY
+
+      - name: Upload CP7 authoritative pricing evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp7-authoritative-fdm-pricing
+          path: |
+            /tmp/cp7-evidence/cp7-probe.log
+            /tmp/cp7-evidence/cp7-report.json
+            /tmp/cp7-evidence/cp7-flat-manifest.json
+            /tmp/cp7-evidence/cp7-flat-pricing.json
+            /tmp/cp7-evidence/cp7-overhang-manifest.json
+            /tmp/cp7-evidence/cp7-overhang-pricing.json
+            /tmp/cp7-evidence/toolchain-receipt.json
+            /tmp/cp7-flat-exact-gcode/*.gcode
+            /tmp/cp7-overhang-exact-gcode/*.gcode
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show service logs on failure
+        if: failure()
+        run: docker logs workpiece-cp7 || true
