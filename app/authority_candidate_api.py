@@ -20,27 +20,16 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 
 from .fdm_authority_candidate import FDM_AUTHORITY_CANDIDATE_API_VERSION, build_fdm_authority_candidate
+from .fdm_authority_http_project import FdmAuthoritySourceError, RATRIG_PRINTER_KEY, prepare_fdm_authority_project
 from .main import (
     MATERIALS,
-    MAX_PROJECT_BYTES,
     MAX_PROJECT_QUANTITY,
     ORCA_BIN,
-    ORCA_VERSION,
-    PROJECT_PRINTERS,
     SERVICE_COMMIT_SHA,
     SLICE_TIMEOUT_SECONDS,
-    build_project_command,
-    choose_project_printer,
-    inspect_project_3mf,
-    inspect_stl,
-    isolated_orca_env,
     parse_gcode_summary,
     profiles_ready,
-    project_profile_paths,
-    repair_project_plate_layout,
-    run_orca,
     save_upload,
-    sha256_file,
 )
 
 ENABLE_FDM_AUTHORITY_V2_API = os.getenv("ENABLE_FDM_AUTHORITY_V2_API", "0").strip().lower() in {"1", "true", "yes"}
@@ -56,7 +45,7 @@ FDM_PACKAGE_INVENTORY = Path(os.getenv("FDM_PACKAGE_INVENTORY", "/opt/workpiece-
 _DIGEST_REF = re.compile(r"^.+@sha256:[a-f0-9]{64}$")
 _COMMIT = re.compile(r"^[a-f0-9]{40}$")
 AUTHORITY_GENERATION_LOCK = threading.Lock()
-RATRIG = "ratrig_vcore3_300"
+RATRIG = RATRIG_PRINTER_KEY
 
 app = FastAPI(
     title="Workpiece FDM Authority v2 Candidate API",
@@ -130,16 +119,7 @@ def health() -> dict:
     }
 
 
-@app.post("/v2/authority-candidate")
-async def build_authority_candidate(
-    _access: Annotated[None, Depends(authority_access)],
-    file: Annotated[UploadFile, File(description="Single-colour immutable STL")],
-    material: Annotated[str, Form()] = "pla",
-    quality: Annotated[str, Form()] = "balanced",
-    strength: Annotated[str, Form()] = "functional",
-    quantity: Annotated[int, Form()] = 1,
-    printer: Annotated[str, Form()] = RATRIG,
-) -> dict:
+def _validate_request(material: str, quality: str, strength: str, quantity: int, printer: str, filename: str) -> None:
     if material not in MATERIALS:
         raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
     if quality not in {"draft", "balanced", "fine"}:
@@ -153,104 +133,50 @@ async def build_authority_candidate(
             status_code=422,
             detail="Authority v2 candidate API currently supports only ratrig_vcore3_300; temporary/generic Ender authority is intentionally blocked.",
         )
-    filename = file.filename or "upload.stl"
     if Path(filename).suffix.lower() != ".stl":
         raise HTTPException(status_code=415, detail="Authority v2 candidate API accepts STL files only.")
+
+
+@app.post("/v2/authority-candidate")
+async def build_authority_candidate(
+    _access: Annotated[None, Depends(authority_access)],
+    file: Annotated[UploadFile, File(description="Single-colour immutable STL")],
+    material: Annotated[str, Form()] = "pla",
+    quality: Annotated[str, Form()] = "balanced",
+    strength: Annotated[str, Form()] = "functional",
+    quantity: Annotated[int, Form()] = 1,
+    printer: Annotated[str, Form()] = RATRIG,
+) -> dict:
+    filename = file.filename or "upload.stl"
+    _validate_request(material, quality, strength, quantity, printer, filename)
 
     with tempfile.TemporaryDirectory(prefix="workpiece-authority-v2-") as temporary:
         job = Path(temporary)
         source_path = job / "source-original.stl"
         await save_upload(file, source_path)
         try:
-            inspection = inspect_stl(source_path)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        selected = choose_project_printer(RATRIG, material, inspection["dimensions_mm"])
-        if selected != RATRIG or PROJECT_PRINTERS[selected]["temporary_generic"]:
-            raise HTTPException(status_code=422, detail="Authority v2 candidate routing did not resolve to the exact RatRig profile.")
-        machine_path, process_path, filament_path = project_profile_paths(selected, material, job, quality, strength)
-        project_path = job / "workpiece-production.3mf"
-        generation_env = isolated_orca_env(job)
-
-        sources = [source_path]
-        for index in range(2, quantity + 1):
-            instance = job / f"source-instance-{index:03d}.stl"
-            try:
-                os.link(source_path, instance)
-            except OSError:
-                instance = source_path
-            sources.append(instance)
-
-        command = build_project_command(
-            orca_bin=ORCA_BIN,
-            machine_profile=machine_path,
-            process_profile=process_path,
-            filament_profile=filament_path,
-            sources=sources,
-            project_path=project_path,
-            auto_orient=True,
-            allow_arrange_rotations=False,
-        )
-        run_orca(command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=generation_env)
-        if not project_path.is_file():
-            candidates = sorted(job.rglob("*.3mf"), key=lambda item: item.stat().st_size, reverse=True)
-            if not candidates:
-                raise HTTPException(status_code=422, detail="OrcaSlicer completed without exporting an editable authority project 3MF.")
-            project_path = candidates[0]
-
-        try:
-            layout_repair = repair_project_plate_layout(
-                project_path,
-                envelope_mm=PROJECT_PRINTERS[RATRIG]["envelope_mm"],
+            prepared = prepare_fdm_authority_project(
+                source_path=source_path,
+                job_dir=job,
+                material=material,
+                quality=quality,
+                strength=strength,
+                quantity=quantity,
+                printer_key=RATRIG,
             )
-            project_inspection = inspect_project_3mf(project_path)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        project_size = project_path.stat().st_size
-        if project_size <= 0 or project_size > MAX_PROJECT_BYTES:
-            raise HTTPException(status_code=422, detail="Authority production 3MF is outside the supported project-size limit.")
-        if project_inspection["instance_count"] != quantity:
-            raise HTTPException(status_code=422, detail="Authority production 3MF quantity does not match the exact request.")
-        if not project_inspection["embedded"]["project_settings"]:
-            raise HTTPException(status_code=422, detail="Authority production 3MF does not retain embedded project settings.")
-
-        generation_receipt = {
-            "source": {"sha256": sha256_file(source_path)},
-            "printer": {"key": RATRIG, "temporary_generic": False},
-            "profiles": {
-                "machine": {"identity": f"{RATRIG}:machine", "sha256": sha256_file(machine_path)},
-                "process": {
-                    "identity": f"{RATRIG}:{material}:{quality}:{strength}:process",
-                    "sha256": sha256_file(process_path),
-                },
-                "filament": {"identity": f"{RATRIG}:{material}:filament", "sha256": sha256_file(filament_path)},
-            },
-            "engine": {
-                "name": "OrcaSlicer",
-                "version": ORCA_VERSION,
-                "service_commit": SERVICE_COMMIT_SHA.lower(),
-            },
-            "project": {"sha256": sha256_file(project_path)},
-            "request": {
-                "material": material,
-                "quality": quality,
-                "strength": strength,
-                "quantity": quantity,
-                "supports": "automatic",
-                "orientation": "orca_auto",
-                "arrangement": "orca_auto",
-            },
-        }
+        except FdmAuthoritySourceError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=422, detail=f"FDM Authority v2 project preparation failed closed: {exc}") from exc
 
         try:
             result = build_fdm_authority_candidate(
-                source_path=source_path,
-                project_path=project_path,
-                machine_profile_bytes=machine_path.read_bytes(),
-                process_profile_bytes=process_path.read_bytes(),
-                filament_profile_bytes=filament_path.read_bytes(),
-                generation_receipt=generation_receipt,
+                source_path=prepared.source_path,
+                project_path=prepared.project_path,
+                machine_profile_bytes=prepared.machine_profile_path.read_bytes(),
+                process_profile_bytes=prepared.process_profile_path.read_bytes(),
+                filament_profile_bytes=prepared.filament_profile_path.read_bytes(),
+                generation_receipt=prepared.generation_receipt,
                 orca_bin=ORCA_BIN,
                 timeout_seconds=SLICE_TIMEOUT_SECONDS,
                 service_commit=SERVICE_COMMIT_SHA.lower(),
@@ -280,16 +206,16 @@ async def build_authority_candidate(
             "humanReview": {"required": True, "status": "pending"},
             "source": {
                 "filename": Path(filename).name,
-                "sha256": generation_receipt["source"]["sha256"],
-                "inspection": inspection,
+                "sha256": prepared.generation_receipt["source"]["sha256"],
+                "inspection": prepared.inspection,
             },
             "project": {
                 "filename": "workpiece-production.3mf",
-                "bytes": project_size,
-                "sha256": generation_receipt["project"]["sha256"],
-                "instanceCount": project_inspection["instance_count"],
-                "plateCount": len(project_inspection.get("plates") or []),
-                "layoutRepairApplied": layout_repair is not None,
+                "bytes": prepared.project_bytes,
+                "sha256": prepared.generation_receipt["project"]["sha256"],
+                "instanceCount": prepared.project_inspection["instance_count"],
+                "plateCount": len(prepared.project_inspection.get("plates") or []),
+                "layoutRepairApplied": prepared.layout_repair_applied,
             },
             "manifest": result.manifest,
             "pricing": result.pricing,
