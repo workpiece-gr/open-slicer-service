@@ -220,8 +220,9 @@ jobs:
           docker cp tests/cp7_real_pricing_probe.py workpiece-cp7:/tmp/cp7_real_pricing_probe.py
 
           set +e
-          docker exec workpiece-cp7 python /tmp/cp7_real_pricing_probe.py
-          status=$?
+          docker exec workpiece-cp7 python /tmp/cp7_real_pricing_probe.py \
+            2>&1 | tee /tmp/cp7-evidence/cp7-probe.log
+          status=${PIPESTATUS[0]}
           set -e
           for name in flat overhang; do
             docker cp "workpiece-cp7:/tmp/cp7-${name}-manifest.json" "/tmp/cp7-evidence/cp7-${name}-manifest.json" || true
@@ -273,6 +274,7 @@ jobs:
         with:
           name: cp7-authoritative-fdm-pricing
           path: |
+            /tmp/cp7-evidence/cp7-probe.log
             /tmp/cp7-evidence/cp7-report.json
             /tmp/cp7-evidence/cp7-flat-manifest.json
             /tmp/cp7-evidence/cp7-flat-pricing.json
