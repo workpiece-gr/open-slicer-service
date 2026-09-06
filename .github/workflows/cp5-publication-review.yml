@@ -45,8 +45,18 @@ jobs:
       - name: Check out exact source
         uses: actions/checkout@v4
 
+      - name: Use repository CI Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install review-test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
       - name: Run CP5 publication-review unit tests
-        run: python -m pytest -q tests/test_fdm_toolchain_provenance.py tests/test_fdm_toolchain_publication_review.py
+        run: PYTHONPATH=. pytest -q tests/test_fdm_toolchain_provenance.py tests/test_fdm_toolchain_publication_review.py
 
       - name: Build unpublished toolchain candidate
         run: docker build -f Dockerfile.toolchain -t workpiece-fdm-toolchain:publication-review .
