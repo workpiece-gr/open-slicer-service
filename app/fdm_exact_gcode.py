@@ -1,17 +1,22 @@
-"""Exact retained G-code artifact helpers for FDM Authority v2 CP2.
+"""Exact retained G-code execution for FDM Authority v2 CP2.
 
-This module deliberately does not execute OrcaSlicer.  It validates the boundary
-between an already-retained production 3MF inspection and the exact G-code files
-emitted when that 3MF is reopened and sliced.  Later CP2 wiring can use the same
-collector without changing the legacy production-project path.
+The CP2 path accepts an already-retained production 3MF as its sole manufacturing
+input.  It reopens that exact project in a fresh OrcaSlicer process, retains the
+exact per-plate G-code bytes, hashes those same bytes, and binds them back to the
+3MF plate ids.  It does not grant production authority; CP3 validation is still
+required.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Mapping
+
+from .project_builder import inspect_project_3mf, verify_project_command
 
 
 _PLATE_GCODE_RE = re.compile(r"^plate_([1-9][0-9]*)\.gcode$")
@@ -22,10 +27,18 @@ def _record(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def fresh_orca_env(base_env: Mapping[str, str], xdg_root: Path) -> dict[str, str]:
     """Create a clean XDG root for the exact-project downstream Orca process.
 
-    The caller must provide a root that does not already contain state.  Existing
+    The caller must provide a root that does not already contain state. Existing
     generation-process XDG variables in ``base_env`` are deliberately replaced.
     """
 
@@ -48,7 +61,7 @@ def project_plate_ids(project_inspection: Mapping[str, Any] | Any) -> tuple[int,
     """Return the exact non-empty physical plate ids recorded in the 3MF.
 
     CP2 fails closed if plate metadata is absent, duplicated, malformed, or
-    describes an empty plate.  We do not infer physical plates from quantity or
+    describes an empty plate. We do not infer physical plates from quantity or
     from G-code filenames.
     """
 
@@ -86,9 +99,9 @@ def collect_exact_gcode_artifacts(
     """Map Orca 2.4.2 ``plate_N.gcode`` outputs to exact 3MF plate ids.
 
     Every expected 3MF plate must have exactly one canonical G-code output and
-    no extra G-code may exist.  The exact bytes are retained in-memory in the
+    no extra G-code may exist. The exact bytes are retained in-memory in the
     returned records so callers can persist or package the same bytes that were
-    hashed.  This function does not grant production authority by itself.
+    hashed. This function does not grant production authority by itself.
     """
 
     digest = project_sha256.strip().lower() if isinstance(project_sha256, str) else ""
@@ -129,3 +142,76 @@ def collect_exact_gcode_artifacts(
         raise ValueError(f"Fresh-Orca G-code plate set mismatch; missing={missing}, extra={extra}.")
 
     return [by_plate[plate_id] for plate_id in sorted(by_plate)]
+
+
+def execute_exact_project_gcode(
+    *,
+    orca_bin: Path,
+    project_path: Path,
+    output_dir: Path,
+    timeout_seconds: int,
+    base_env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Slice the exact retained 3MF in a fresh process and retain exact outputs.
+
+    No STL path or external profile path is accepted by this API. The returned
+    artifact records contain the exact bytes that were hashed. Callers are
+    responsible for durable persistence before the temporary workspace is
+    removed.
+    """
+
+    if not orca_bin.is_file():
+        raise ValueError("The pinned OrcaSlicer binary is not available.")
+    if not project_path.is_file() or project_path.stat().st_size < 1:
+        raise ValueError("The retained production 3MF is missing or empty.")
+    if timeout_seconds < 1:
+        raise ValueError("A positive Orca timeout is required.")
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise ValueError("The exact G-code output directory must be empty before slicing.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        project_inspection = inspect_project_3mf(project_path)
+    except ValueError as exc:
+        raise ValueError(f"The retained production 3MF failed inspection: {exc}") from exc
+    expected_plate_ids = project_plate_ids(project_inspection)
+    project_sha256 = _sha256_file(project_path)
+
+    xdg_root = output_dir / ".xdg"
+    env = fresh_orca_env(base_env or os.environ, xdg_root)
+    command = verify_project_command(
+        orca_bin=orca_bin,
+        project_path=project_path,
+        output_dir=output_dir,
+    )
+    completed = subprocess.run(
+        command,
+        cwd=project_path.parent,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+        env=env,
+    )
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()[-4000:]
+        stdout = (completed.stdout or "").strip()[-2000:]
+        detail = stderr or stdout or f"exit code {completed.returncode}"
+        raise RuntimeError(f"Fresh Orca exact-project slicing failed: {detail}")
+
+    artifacts = collect_exact_gcode_artifacts(
+        output_dir,
+        project_inspection=project_inspection,
+        project_sha256=project_sha256,
+    )
+    if tuple(artifact["plate_id"] for artifact in artifacts) != expected_plate_ids:
+        raise ValueError("Fresh-Orca G-code artifact order does not match the retained 3MF plate ids.")
+
+    return {
+        "performed": True,
+        "reopened_exact_project": True,
+        "fresh_runtime_state": True,
+        "project_sha256": project_sha256,
+        "plate_ids": list(expected_plate_ids),
+        "plates": artifacts,
+    }
