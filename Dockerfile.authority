@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+
+# Parallel FDM Authority v2 service image. Normal/live builds continue to use
+# Dockerfile. CI or a future explicitly approved production path must supply an
+# immutable TOOLCHAIN_IMAGE=image@sha256 reference from fdm-toolchain.lock.json.
+ARG TOOLCHAIN_IMAGE=workpiece-fdm-toolchain:local
+FROM ${TOOLCHAIN_IMAGE}
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    ORCA_BIN=/opt/orca/squashfs-root/AppRun \
+    PROFILE_ROOT=/app/profiles \
+    FDM_TOOLCHAIN_LOCK=/app/fdm-toolchain.lock.json \
+    PORT=8080
+
+RUN test -x /opt/orca/squashfs-root/AppRun \
+    && test -s /opt/workpiece-toolchain/manifest.json \
+    && test -s /opt/workpiece-toolchain/packages.txt
+
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+COPY profiles ./profiles
+COPY fdm-toolchain.lock.json ./fdm-toolchain.lock.json
+
+RUN useradd --create-home --uid 10001 slicer \
+    && chown -R slicer:slicer /app /opt/venv
+USER slicer
+
+EXPOSE 8080
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]
