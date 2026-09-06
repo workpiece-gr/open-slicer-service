@@ -34,6 +34,10 @@ from .main import (
 RATRIG_PRINTER_KEY = "ratrig_vcore3_300"
 
 
+class FdmAuthoritySourceError(ValueError):
+    """The uploaded immutable STL could not pass source inspection."""
+
+
 @dataclass(frozen=True)
 class PreparedFdmAuthorityProject:
     source_path: Path
@@ -68,11 +72,14 @@ def prepare_fdm_authority_project(
     if printer_key != RATRIG_PRINTER_KEY:
         raise ValueError("FDM Authority v2 currently supports only the exact RatRig profile.")
     if not source_path.is_file() or source_path.stat().st_size < 1:
-        raise ValueError("FDM Authority v2 requires a non-empty immutable STL source.")
+        raise FdmAuthoritySourceError("FDM Authority v2 requires a non-empty immutable STL source.")
     if quantity < 1:
         raise ValueError("FDM Authority v2 quantity must be positive.")
 
-    inspection = inspect_stl(source_path)
+    try:
+        inspection = inspect_stl(source_path)
+    except ValueError as exc:
+        raise FdmAuthoritySourceError(str(exc)) from exc
     selected = choose_project_printer(printer_key, material, inspection["dimensions_mm"])
     if selected != RATRIG_PRINTER_KEY or PROJECT_PRINTERS[selected]["temporary_generic"]:
         raise ValueError("FDM Authority v2 routing did not resolve to the exact RatRig profile.")
