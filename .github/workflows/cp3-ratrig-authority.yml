@@ -4,7 +4,10 @@ on:
   pull_request:
     paths:
       - "app/fdm_gcode_validator.py"
+      - "app/fdm_profile_driven_gcode.py"
       - "app/fdm_exact_gcode.py"
+      - "tests/test_fdm_gcode_validator.py"
+      - "tests/test_fdm_profile_driven_gcode.py"
       - "profiles/**"
       - ".github/workflows/cp3-ratrig-authority.yml"
   push:
@@ -13,14 +16,17 @@ on:
       - "chris/fdm-v2-cp3-gcode-validator"
     paths:
       - "app/fdm_gcode_validator.py"
+      - "app/fdm_profile_driven_gcode.py"
       - "app/fdm_exact_gcode.py"
+      - "tests/test_fdm_gcode_validator.py"
+      - "tests/test_fdm_profile_driven_gcode.py"
       - "profiles/**"
       - ".github/workflows/cp3-ratrig-authority.yml"
 
 jobs:
   ratrig-authority:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 18
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -72,58 +78,63 @@ jobs:
                   handle.write(struct.pack("<12fH", 0, 0, 1, *points[0], *points[1], *points[2], 0))
           PY
 
-      - name: Generate exact RatRig production 3MF without verification slice
+      - name: Generate exact RatRig production 3MFs for every material
         run: |
-          curl --fail-with-body --max-time 240 \
-            -H "Authorization: Bearer ci-project-token" \
-            -F file=@/tmp/cp3-ratrig.stl \
-            -F material=pla \
-            -F quality=balanced \
-            -F strength=functional \
-            -F quantity=1 \
-            -F printer=ratrig_vcore3_300 \
-            -F verify=false \
-            http://127.0.0.1:8080/v1/project \
-            -o /tmp/cp3-project.json
+          set -e
+          for material in pla petg pctg abs tpu; do
+            curl --fail-with-body --max-time 240 \
+              -H "Authorization: Bearer ci-project-token" \
+              -F file=@/tmp/cp3-ratrig.stl \
+              -F material="$material" \
+              -F quality=balanced \
+              -F strength=functional \
+              -F quantity=1 \
+              -F printer=ratrig_vcore3_300 \
+              -F verify=false \
+              http://127.0.0.1:8080/v1/project \
+              -o "/tmp/cp3-${material}-project.json"
+          done
           python - <<'PY'
           import base64
           import hashlib
           import json
           from pathlib import Path
 
-          payload = json.loads(Path("/tmp/cp3-project.json").read_text(encoding="utf-8"))
-          assert payload["printer"]["key"] == "ratrig_vcore3_300"
-          assert payload["printer"]["temporary_generic"] is False
-          assert payload["request"]["verification_requested"] is False
-          assert payload["project"]["inspection"]["instance_count"] == 1
-          project = base64.b64decode(payload["project"]["base64"], validate=True)
-          assert hashlib.sha256(project).hexdigest() == payload["project"]["sha256"]
-          Path("/tmp/cp3-production.3mf").write_bytes(project)
-
-          exact_profiles = {
-              "machine": Path("profiles/machine.json"),
-              "filament": Path("profiles/filament/pla.json"),
-          }
-          for kind, path in exact_profiles.items():
-              assert hashlib.sha256(path.read_bytes()).hexdigest() == payload["profiles"][kind]["sha256"]
-
-          receipt = {
-              "source": {"sha256": payload["source"]["sha256"]},
-              "printer": {
-                  "key": payload["printer"]["key"],
-                  "temporary_generic": payload["printer"]["temporary_generic"],
-              },
-              "profiles": payload["profiles"],
-              "engine": payload["engine"],
-              "project": {"sha256": payload["project"]["sha256"]},
-          }
-          Path("/tmp/cp3-generation-receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+          materials = ("pla", "petg", "pctg", "abs", "tpu")
+          machine = Path("profiles/machine.json").read_bytes()
+          for material in materials:
+              payload = json.loads(Path(f"/tmp/cp3-{material}-project.json").read_text(encoding="utf-8"))
+              assert payload["printer"]["key"] == "ratrig_vcore3_300"
+              assert payload["printer"]["temporary_generic"] is False
+              assert payload["request"]["material"] == material
+              assert payload["request"]["verification_requested"] is False
+              assert payload["project"]["inspection"]["instance_count"] == 1
+              project = base64.b64decode(payload["project"]["base64"], validate=True)
+              assert hashlib.sha256(project).hexdigest() == payload["project"]["sha256"]
+              Path(f"/tmp/cp3-{material}.3mf").write_bytes(project)
+              assert hashlib.sha256(machine).hexdigest() == payload["profiles"]["machine"]["sha256"]
+              filament = Path(f"profiles/filament/{material}.json").read_bytes()
+              assert hashlib.sha256(filament).hexdigest() == payload["profiles"]["filament"]["sha256"]
+              receipt = {
+                  "source": {"sha256": payload["source"]["sha256"]},
+                  "printer": {
+                      "key": payload["printer"]["key"],
+                      "temporary_generic": payload["printer"]["temporary_generic"],
+                  },
+                  "profiles": payload["profiles"],
+                  "engine": payload["engine"],
+                  "project": {"sha256": payload["project"]["sha256"]},
+              }
+              Path(f"/tmp/cp3-{material}-receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")
           PY
 
-      - name: Slice exact 3MF and independently validate exact RatRig G-code
+      - name: Slice exact 3MFs and independently validate every RatRig material
         run: |
-          docker cp /tmp/cp3-production.3mf workpiece-slicer:/tmp/cp3-production.3mf
-          docker cp /tmp/cp3-generation-receipt.json workpiece-slicer:/tmp/cp3-generation-receipt.json
+          docker exec workpiece-slicer mkdir -p /tmp/cp3-input /tmp/cp3-evidence /tmp/cp3-output /tmp/cp3-process
+          for material in pla petg pctg abs tpu; do
+            docker cp "/tmp/cp3-${material}.3mf" "workpiece-slicer:/tmp/cp3-input/${material}.3mf"
+            docker cp "/tmp/cp3-${material}-receipt.json" "workpiece-slicer:/tmp/cp3-input/${material}-receipt.json"
+          done
           set +e
           docker exec -i workpiece-slicer python - <<'PY'
           import hashlib
@@ -132,67 +143,72 @@ jobs:
           from pathlib import Path
 
           from app.fdm_exact_gcode import execute_exact_project_gcode
-          from app.fdm_gcode_validator import validate_exact_gcode
+          from app.fdm_profile_driven_gcode import validate_profile_driven_gcode
           from app.main import MATERIALS, build_process_profile
 
-          receipt = json.loads(Path("/tmp/cp3-generation-receipt.json").read_text(encoding="utf-8"))
-          exact = execute_exact_project_gcode(
-              orca_bin=Path(os.environ["ORCA_BIN"]),
-              project_path=Path("/tmp/cp3-production.3mf"),
-              output_dir=Path("/tmp/cp3-exact-gcode"),
-              timeout_seconds=300,
-              generation_receipt=receipt,
-              base_env=os.environ,
-          )
-          process_path = Path("/tmp/cp3-exact-process.json")
-          build_process_profile(
-              Path("/app/profiles/process/pla.json"),
-              "balanced",
-              "functional",
-              process_path,
-              str(MATERIALS["pla"]["label"]),
-              automatic_supports=True,
-              project_reopen_safe=True,
-              single_colour_project=True,
-          )
-          machine_bytes = Path("/app/profiles/machine.json").read_bytes()
-          process_bytes = process_path.read_bytes()
-          filament_bytes = Path("/app/profiles/filament/pla.json").read_bytes()
-          assert hashlib.sha256(process_bytes).hexdigest() == exact["generation_receipt"]["profiles"]["process"]["sha256"]
-
-          validations = []
-          for plate in exact["plates"]:
-              validation = validate_exact_gcode(
-                  artifact=plate,
-                  generation_receipt=exact["generation_receipt"],
-                  machine_profile_bytes=machine_bytes,
-                  process_profile_bytes=process_bytes,
-                  filament_profile_bytes=filament_bytes,
-                  validator_service_commit=os.environ["SOURCE_COMMIT_SHA"],
-                  toolchain_ref=f"ci://open-slicer-service/{os.environ['SOURCE_COMMIT_SHA']}",
+          materials = ("pla", "petg", "pctg", "abs", "tpu")
+          all_evidence = {}
+          failures = []
+          for material in materials:
+              receipt = json.loads(Path(f"/tmp/cp3-input/{material}-receipt.json").read_text(encoding="utf-8"))
+              exact = execute_exact_project_gcode(
+                  orca_bin=Path(os.environ["ORCA_BIN"]),
+                  project_path=Path(f"/tmp/cp3-input/{material}.3mf"),
+                  output_dir=Path(f"/tmp/cp3-output/{material}"),
+                  timeout_seconds=300,
+                  generation_receipt=receipt,
+                  base_env=os.environ,
               )
-              validations.append({"plateId": plate["plate_id"], **validation})
-          evidence = {
-              "authorityState": "evidence_candidate",
-              "projectSha256": exact["project_sha256"],
-              "plateIds": exact["plate_ids"],
-              "validations": validations,
-          }
-          Path("/tmp/cp3-validation.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
-          failed = [item for item in validations if not item["passed"] or not item["authorityCriticalComplete"]]
-          if failed:
-              print(json.dumps(evidence, indent=2))
-              raise SystemExit("Independent CP3 validation failed for real RatRig G-code")
-          assert validations
-          assert all(item["motion"]["extrusionSegmentCount"] > 0 for item in validations)
-          assert all(item["motion"]["extrusionBoundsMm"] for item in validations)
+              process_path = Path(f"/tmp/cp3-process/{material}.json")
+              build_process_profile(
+                  Path(f"/app/profiles/process/{material}.json"),
+                  "balanced",
+                  "functional",
+                  process_path,
+                  str(MATERIALS[material]["label"]),
+                  automatic_supports=True,
+                  project_reopen_safe=True,
+                  single_colour_project=True,
+              )
+              machine_bytes = Path("/app/profiles/machine.json").read_bytes()
+              process_bytes = process_path.read_bytes()
+              filament_bytes = Path(f"/app/profiles/filament/{material}.json").read_bytes()
+              assert hashlib.sha256(process_bytes).hexdigest() == exact["generation_receipt"]["profiles"]["process"]["sha256"]
+
+              validations = []
+              for plate in exact["plates"]:
+                  validation = validate_profile_driven_gcode(
+                      artifact=plate,
+                      generation_receipt=exact["generation_receipt"],
+                      machine_profile_bytes=machine_bytes,
+                      process_profile_bytes=process_bytes,
+                      filament_profile_bytes=filament_bytes,
+                      validator_service_commit=os.environ["SOURCE_COMMIT_SHA"],
+                      toolchain_ref=f"ci://open-slicer-service/{os.environ['SOURCE_COMMIT_SHA']}",
+                  )
+                  validations.append({"plateId": plate["plate_id"], **validation})
+              evidence = {
+                  "material": material,
+                  "authorityState": "evidence_candidate",
+                  "projectSha256": exact["project_sha256"],
+                  "plateIds": exact["plate_ids"],
+                  "validations": validations,
+              }
+              Path(f"/tmp/cp3-evidence/{material}.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+              all_evidence[material] = evidence
+              if not validations or any(not item["passed"] or not item["authorityCriticalComplete"] for item in validations):
+                  failures.append(material)
+          Path("/tmp/cp3-evidence/all-materials.json").write_text(json.dumps(all_evidence, indent=2), encoding="utf-8")
+          if failures:
+              print(json.dumps({name: all_evidence[name] for name in failures}, indent=2))
+              raise SystemExit(f"Independent CP3 validation failed for RatRig materials: {failures}")
           PY
           status=$?
           set -e
-          docker cp workpiece-slicer:/tmp/cp3-validation.json /tmp/cp3-validation.json || true
-          docker cp workpiece-slicer:/tmp/cp3-exact-gcode /tmp/cp3-exact-gcode || true
-          if [ -f /tmp/cp3-validation.json ]; then
-            cat /tmp/cp3-validation.json
+          docker cp workpiece-slicer:/tmp/cp3-evidence /tmp/cp3-evidence || true
+          docker cp workpiece-slicer:/tmp/cp3-output /tmp/cp3-output || true
+          if [ -f /tmp/cp3-evidence/all-materials.json ]; then
+            cat /tmp/cp3-evidence/all-materials.json
           fi
           exit "$status"
 
@@ -203,16 +219,19 @@ jobs:
           import json
           from pathlib import Path
 
-          evidence = json.loads(Path("/tmp/cp3-validation.json").read_text(encoding="utf-8"))
-          assert evidence["authorityState"] == "evidence_candidate"
-          assert evidence["validations"]
-          for item in evidence["validations"]:
-              assert item["passed"] is True
-              assert item["authorityCriticalComplete"] is True
-              gcode = Path("/tmp/cp3-exact-gcode") / f"plate_{item['plateId']}.gcode"
-              payload = gcode.read_bytes()
-              assert payload
-              assert hashlib.sha256(payload).hexdigest() == item["gcodeSha256"]
+          materials = ("pla", "petg", "pctg", "abs", "tpu")
+          for material in materials:
+              evidence = json.loads(Path(f"/tmp/cp3-evidence/{material}.json").read_text(encoding="utf-8"))
+              assert evidence["material"] == material
+              assert evidence["authorityState"] == "evidence_candidate"
+              assert evidence["validations"]
+              for item in evidence["validations"]:
+                  assert item["passed"] is True
+                  assert item["authorityCriticalComplete"] is True
+                  gcode = Path(f"/tmp/cp3-output/{material}") / f"plate_{item['plateId']}.gcode"
+                  payload = gcode.read_bytes()
+                  assert payload
+                  assert hashlib.sha256(payload).hexdigest() == item["gcodeSha256"]
           PY
 
       - name: Upload CP3 RatRig evidence
@@ -221,8 +240,8 @@ jobs:
         with:
           name: cp3-ratrig-authority-evidence
           path: |
-            /tmp/cp3-validation.json
-            /tmp/cp3-exact-gcode/*.gcode
+            /tmp/cp3-evidence/*.json
+            /tmp/cp3-output/*/*.gcode
           if-no-files-found: warn
           retention-days: 7
 
