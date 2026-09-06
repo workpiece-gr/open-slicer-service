@@ -48,8 +48,11 @@ preconditions are incomplete. Do not change that status or add a digest until
 the real immutable image has been published and reviewed.
 
 Likewise, the machine qualification evidence ID must come from a real physical
-qualification record. It must never be invented to make software tests or a
-health check pass.
+qualification record. It must never be invented to make software authority pass.
+
+Current production qualification configuration:
+
+- `WORKPIECE_FDM_MACHINE_QUALIFICATION_EVIDENCE_ID`
 
 ## Human review remains separate
 
