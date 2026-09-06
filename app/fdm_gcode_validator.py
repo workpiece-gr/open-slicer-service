@@ -1,9 +1,9 @@
 """Independent Workpiece G-code validator for FDM Authority v2 CP3.
 
 The validator never calls OrcaSlicer. It consumes exact retained G-code bytes,
-CP2 provenance receipts, and exact machine/filament profile bytes whose SHA-256
-values must match those receipts. Physical limits are derived only from those
-profile bytes; no calibration or thermal limits are invented here.
+CP2 provenance receipts, and exact machine/process/filament profile bytes whose
+SHA-256 values must match those receipts. Physical limits are derived only from
+those exact profile bytes; no calibration or thermal limits are invented here.
 """
 
 from __future__ import annotations
@@ -21,15 +21,20 @@ VALIDATOR_VERSION = "1.0.0"
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _COMMIT_RE = re.compile(r"^[a-f0-9]{40}$")
+_NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _GCODE_TOKEN_RE = re.compile(r"^[GM]\d+$")
 _TOOL_TOKEN_RE = re.compile(r"^T\d+$")
 _AXIS_RE = re.compile(r"([XYZEFS])([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)", re.I)
 _MACRO_ARG_RE = re.compile(r"\b([A-Z][A-Z0-9_]*)=([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\b")
+_NAME_ARG_RE = re.compile(r"(?:^|\s)NAME=([A-Za-z0-9_.:+-]+)(?:\s|$)")
+_CENTER_ARG_RE = re.compile(r"(?:^|\s)CENTER=([^\s]+)(?:\s|$)")
+_POLYGON_ARG_RE = re.compile(r"(?:^|\s)POLYGON=(\[.*\])(?:\s|$)")
 
 _ALLOWED_G = {"G0", "G1", "G4", "G10", "G11", "G21", "G28", "G90", "G91", "G92"}
-_HANDLED_M = {"M82", "M83", "M104", "M109", "M140", "M190", "M200"}
+_HANDLED_M = {"M73", "M82", "M83", "M104", "M106", "M109", "M140", "M190", "M200"}
 _FORBIDDEN_M = {"M112", "M206", "M500", "M501", "M502", "M524", "M997", "M999"}
 _FORBIDDEN_MACROS = {"FIRMWARE_RESTART", "RESTART", "RUN_SHELL_COMMAND", "SAVE_CONFIG"}
+_KNOWN_EXTENDED = {"EXCLUDE_OBJECT_DEFINE", "EXCLUDE_OBJECT_START", "EXCLUDE_OBJECT_END", "SET_VELOCITY_LIMIT"}
 _PROFILE_KINDS = ("machine", "process", "filament")
 
 
@@ -56,6 +61,16 @@ def _finite(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _first_scalars(value: Any) -> list[float]:
+    raw = value if isinstance(value, list) else [value]
+    result: list[float] = []
+    for item in raw:
+        number = _finite(item)
+        if number is not None:
+            result.append(number)
+    return result
 
 
 def _first_scalar(value: Any) -> str:
@@ -124,9 +139,32 @@ def _macro_tokens(profile: Mapping[str, Any]) -> set[str]:
     return result
 
 
-def build_validation_policy(*, printer_key: str, machine_profile_bytes: bytes, filament_profile_bytes: bytes) -> dict[str, Any]:
-    """Build validator policy only from exact profile bytes supplied by caller."""
+def _toolhead_acceleration_limit(machine: Mapping[str, Any]) -> float:
+    values: list[float] = []
+    for key in (
+        "machine_max_acceleration_extruding",
+        "machine_max_acceleration_retracting",
+        "machine_max_acceleration_travel",
+        "machine_max_acceleration_x",
+        "machine_max_acceleration_y",
+    ):
+        values.extend(number for number in _first_scalars(machine.get(key)) if number > 0)
+    if not values:
+        raise ValueError("The machine profile does not expose exact positive toolhead acceleration limits.")
+    return min(values)
+
+
+def build_validation_policy(
+    *,
+    printer_key: str,
+    machine_profile_bytes: bytes,
+    process_profile_bytes: bytes,
+    filament_profile_bytes: bytes,
+) -> dict[str, Any]:
+    """Build validator policy only from exact SHA-bound profile bytes."""
+
     machine = _profile_json(machine_profile_bytes, "machine")
+    process = _profile_json(process_profile_bytes, "process")
     filament = _profile_json(filament_profile_bytes, "filament")
     width, depth = _parse_printable_area(machine.get("printable_area"))
     height = _finite(machine.get("printable_height"))
@@ -148,18 +186,22 @@ def build_validation_policy(*, printer_key: str, machine_profile_bytes: bytes, f
     if not bed_values:
         raise ValueError("The filament profile does not expose explicit bed temperature setpoints.")
 
-    macros = _macro_tokens(machine) | _macro_tokens(filament)
+    macros = _macro_tokens(machine) | _macro_tokens(process) | _macro_tokens(filament)
     if macros & _FORBIDDEN_MACROS:
         raise ValueError("An exact profile requests a macro that CP3 forbids for authority.")
+
     flavor = _text(machine.get("gcode_flavor")).lower()
-    if not flavor:
-        raise ValueError("The machine profile does not declare gcode_flavor.")
+    if flavor != "klipper":
+        raise ValueError("CP3 currently provides independent motion-command semantics only for Klipper FDM profiles.")
+
     return {
         "printerKey": printer_key,
         "gcodeFlavor": flavor,
         "envelopeMm": [width, depth, height],
+        "maxToolheadAccelerationMmS2": _toolhead_acceleration_limit(machine),
         "nozzleTemperatureRangeC": [nozzle_low, nozzle_high],
         "bedTemperatureRangeC": [min(bed_values), max(bed_values)],
+        "excludeObjectAnnotations": str(process.get("exclude_object")).strip().lower() in {"1", "true"},
         "allowedMacros": sorted(macros),
     }
 
@@ -171,12 +213,80 @@ def _issue(issues: list[dict[str, Any]], code: str, line: int | None, message: s
     issues.append(entry)
 
 
+def _letter_params(code: str) -> dict[str, float] | None:
+    params: dict[str, float] = {}
+    for raw in code.split()[1:]:
+        if len(raw) < 2 or len(raw[0]) != 1 or not raw[0].isalpha() or not _NUMBER_RE.fullmatch(raw[1:]):
+            return None
+        key = raw[0].upper()
+        if key in params:
+            return None
+        params[key] = float(raw[1:])
+    return params
+
+
+def _extended_numeric_params(code: str) -> dict[str, float] | None:
+    params: dict[str, float] = {}
+    for raw in code.split()[1:]:
+        if "=" not in raw:
+            return None
+        name, value = raw.split("=", 1)
+        name = name.upper()
+        if not name or name in params or not _NUMBER_RE.fullmatch(value):
+            return None
+        params[name] = float(value)
+    return params
+
+
+def _object_name(code: str) -> str:
+    match = _NAME_ARG_RE.search(code)
+    return match.group(1) if match else ""
+
+
+def _validate_object_definition(code: str, envelope: list[float] | None) -> tuple[str, str | None]:
+    name = _object_name(code)
+    center_match = _CENTER_ARG_RE.search(code)
+    polygon_match = _POLYGON_ARG_RE.search(code)
+    if not name or not center_match or not polygon_match:
+        return name, "Object definition must contain NAME, CENTER, and POLYGON."
+    try:
+        center_values = [float(value) for value in center_match.group(1).split(",")]
+        polygon = json.loads(polygon_match.group(1))
+    except (ValueError, json.JSONDecodeError):
+        return name, "Object definition contains malformed CENTER or POLYGON coordinates."
+    if len(center_values) != 2 or not all(math.isfinite(value) for value in center_values):
+        return name, "Object definition CENTER must contain two finite coordinates."
+    if not isinstance(polygon, list) or len(polygon) < 3:
+        return name, "Object definition POLYGON must contain at least three points."
+    points: list[tuple[float, float]] = []
+    for point in polygon:
+        if not isinstance(point, list) or len(point) != 2:
+            return name, "Object definition POLYGON contains a malformed point."
+        x, y = _finite(point[0]), _finite(point[1])
+        if x is None or y is None:
+            return name, "Object definition POLYGON contains a non-finite point."
+        points.append((x, y))
+    if envelope:
+        width, depth = float(envelope[0]), float(envelope[1])
+        if not (0 <= center_values[0] <= width and 0 <= center_values[1] <= depth):
+            return name, "Object definition CENTER is outside the exact machine envelope."
+        if any(x < 0 or x > width or y < 0 or y > depth for x, y in points):
+            return name, "Object definition POLYGON is outside the exact machine envelope."
+    return name, None
+
+
 def validate_exact_gcode(
-    *, artifact: Mapping[str, Any] | Any, generation_receipt: Mapping[str, Any] | Any,
-    machine_profile_bytes: bytes, filament_profile_bytes: bytes,
-    validator_service_commit: str, toolchain_ref: str,
+    *,
+    artifact: Mapping[str, Any] | Any,
+    generation_receipt: Mapping[str, Any] | Any,
+    machine_profile_bytes: bytes,
+    process_profile_bytes: bytes,
+    filament_profile_bytes: bytes,
+    validator_service_commit: str,
+    toolchain_ref: str,
 ) -> dict[str, Any]:
     """Validate exact CP2 G-code bytes without invoking OrcaSlicer."""
+
     artifact = _record(artifact)
     generation = _record(generation_receipt)
     source = _record(generation.get("source"))
@@ -208,6 +318,11 @@ def validate_exact_gcode(
 
     profile_hashes: dict[str, str] = {}
     artifact_profiles = _record(artifact.get("profile_sha256"))
+    exact_profile_bytes = {
+        "machine": machine_profile_bytes,
+        "process": process_profile_bytes,
+        "filament": filament_profile_bytes,
+    }
     for kind in _PROFILE_KINDS:
         expected = _sha(_record(profiles.get(kind)).get("sha256"))
         actual = _sha(artifact_profiles.get(kind))
@@ -215,22 +330,21 @@ def validate_exact_gcode(
             _issue(issues, "profile_sha256_mismatch", None, f"{kind} profile hash is not bound to the generation receipt.")
         if expected:
             profile_hashes[kind] = expected
-    if profile_hashes.get("machine") and _digest(machine_profile_bytes) != profile_hashes["machine"]:
-        _issue(issues, "machine_profile_bytes_mismatch", None, "Exact machine profile bytes do not match the generation SHA-256.")
-    if profile_hashes.get("filament") and _digest(filament_profile_bytes) != profile_hashes["filament"]:
-        _issue(issues, "filament_profile_bytes_mismatch", None, "Exact filament profile bytes do not match the generation SHA-256.")
+            if _digest(exact_profile_bytes[kind]) != expected:
+                _issue(issues, f"{kind}_profile_bytes_mismatch", None, f"Exact {kind} profile bytes do not match the generation SHA-256.")
 
     printer_key = _text(printer.get("key"))
     if _text(artifact.get("printer_key")) != printer_key:
         _issue(issues, "printer_mismatch", None, "CP2 artifact printer key differs from the generation receipt.")
 
     policy: dict[str, Any] | None = None
-    blocking = {"machine_profile_bytes_mismatch", "filament_profile_bytes_mismatch"}
+    blocking = {f"{kind}_profile_bytes_mismatch" for kind in _PROFILE_KINDS}
     if not any(issue["code"] in blocking for issue in issues):
         try:
             policy = build_validation_policy(
                 printer_key=printer_key,
                 machine_profile_bytes=machine_profile_bytes,
+                process_profile_bytes=process_profile_bytes,
                 filament_profile_bytes=filament_profile_bytes,
             )
         except ValueError as exc:
@@ -257,11 +371,18 @@ def validate_exact_gcode(
     observed_commands: set[str] = set()
     nozzle_targets: list[float] = []
     bed_targets: list[float] = []
+    fan_targets: list[float] = []
+    progress_targets: list[float] = []
+    velocity_accelerations: list[float] = []
+    defined_objects: set[str] = set()
+    active_object: str | None = None
 
     envelope = policy.get("envelopeMm") if policy else None
     allowed_macros = set(policy.get("allowedMacros") or []) if policy else set()
     nozzle_range = policy.get("nozzleTemperatureRangeC") if policy else None
     bed_range = policy.get("bedTemperatureRangeC") if policy else None
+    max_acceleration = policy.get("maxToolheadAccelerationMmS2") if policy else None
+    exclude_annotations = bool(policy and policy.get("excludeObjectAnnotations"))
 
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         code = raw_line.split(";", 1)[0].strip()
@@ -273,6 +394,57 @@ def validate_exact_gcode(
         if token in _FORBIDDEN_MACROS or token in _FORBIDDEN_M:
             _issue(issues, "forbidden_command", line_number, f"{token} is forbidden by the Workpiece validator.")
             continue
+
+        if token == "SET_VELOCITY_LIMIT":
+            observed_macros.add(token)
+            params = _extended_numeric_params(code)
+            if params is None or set(params) != {"ACCEL"}:
+                _issue(issues, "unsupported_velocity_limit_form", line_number, "CP3 currently permits only SET_VELOCITY_LIMIT ACCEL=<value>.")
+                continue
+            value = params["ACCEL"]
+            velocity_accelerations.append(value)
+            if value <= 0 or max_acceleration is None or value > float(max_acceleration) + 1e-9:
+                _issue(issues, "acceleration_out_of_policy", line_number, "SET_VELOCITY_LIMIT acceleration exceeds the exact machine-profile toolhead limit.")
+            continue
+
+        if token == "EXCLUDE_OBJECT_DEFINE":
+            observed_macros.add(token)
+            if not exclude_annotations:
+                _issue(issues, "unexpected_exclude_object_annotation", line_number, "Exact process profile does not enable exclude-object annotations.")
+                continue
+            name, error = _validate_object_definition(code, envelope)
+            if error:
+                _issue(issues, "invalid_exclude_object_definition", line_number, error)
+            elif name in defined_objects:
+                _issue(issues, "duplicate_exclude_object_definition", line_number, f"Object {name} is defined more than once.")
+            else:
+                defined_objects.add(name)
+            continue
+
+        if token == "EXCLUDE_OBJECT_START":
+            observed_macros.add(token)
+            name = _object_name(code)
+            if not exclude_annotations or not name or name not in defined_objects:
+                _issue(issues, "invalid_exclude_object_start", line_number, "EXCLUDE_OBJECT_START must reference a defined object enabled by the exact process profile.")
+            elif active_object is not None:
+                _issue(issues, "nested_exclude_object_start", line_number, "Exclude-object annotations may not overlap.")
+            else:
+                active_object = name
+            continue
+
+        if token == "EXCLUDE_OBJECT_END":
+            observed_macros.add(token)
+            name = _object_name(code)
+            if not exclude_annotations or not name or active_object != name:
+                _issue(issues, "invalid_exclude_object_end", line_number, "EXCLUDE_OBJECT_END must close the currently active defined object.")
+            else:
+                active_object = None
+            continue
+
+        if token in _KNOWN_EXTENDED:
+            _issue(issues, "unhandled_extended_command", line_number, f"{token} reached an unhandled extended-command path.")
+            continue
+
         if _is_macro(token):
             observed_macros.add(token)
             if token not in allowed_macros:
@@ -285,10 +457,12 @@ def validate_exact_gcode(
                 if "BED_TEMP" in args:
                     bed_targets.append(args["BED_TEMP"])
             continue
+
         if _TOOL_TOKEN_RE.fullmatch(token):
             if token != "T0":
                 _issue(issues, "unsupported_tool_change", line_number, "CP3 currently validates only single-tool FDM G-code.")
             continue
+
         if token.startswith("G"):
             if token not in _ALLOWED_G:
                 _issue(issues, "unsupported_g_command", line_number, f"{token} can affect motion semantics and is not independently proven by CP3.")
@@ -351,6 +525,23 @@ def validate_exact_gcode(
             e_absolute = True
         elif token == "M83":
             e_absolute = False
+        elif token == "M73":
+            params = _letter_params(code)
+            if params is None or "P" not in params or set(params) - {"P", "R"}:
+                _issue(issues, "invalid_progress_command", line_number, "M73 must contain bounded P progress and optional non-negative R remaining-time metadata.")
+            else:
+                progress = params["P"]
+                remaining = params.get("R")
+                if progress < 0 or progress > 100 or not progress.is_integer() or (remaining is not None and remaining < 0):
+                    _issue(issues, "invalid_progress_command", line_number, "M73 progress metadata is outside the supported range.")
+                else:
+                    progress_targets.append(progress)
+        elif token == "M106":
+            params = _letter_params(code)
+            if params is None or set(params) != {"S"} or params["S"] < 0 or params["S"] > 255:
+                _issue(issues, "invalid_fan_command", line_number, "M106 must contain only S in the Klipper-supported 0-255 range.")
+            else:
+                fan_targets.append(params["S"])
         elif token in {"M104", "M109", "M140", "M190"}:
             values = {axis.upper(): float(value) for axis, value in _AXIS_RE.findall(code)}
             if "S" in values:
@@ -358,6 +549,8 @@ def validate_exact_gcode(
         elif token == "M200":
             _issue(issues, "unsupported_extrusion_units", line_number, "Volumetric extrusion mode is not independently supported by CP3.")
 
+    if active_object is not None:
+        _issue(issues, "unclosed_exclude_object_annotation", None, f"Object annotation {active_object} was not closed.")
     if extrusion_count < 1:
         _issue(issues, "no_proven_extrusion", None, "No in-envelope extrusion path was independently proven.")
 
@@ -400,6 +593,10 @@ def validate_exact_gcode(
         "policy": policy,
         "motion": {"extrusionSegmentCount": extrusion_count, "extrusionBoundsMm": bounds},
         "temperatures": {"nozzleTargetsC": nozzle_targets, "bedTargetsC": bed_targets},
+        "fanTargets": fan_targets,
+        "progressTargets": progress_targets,
+        "velocityLimitAccelerations": velocity_accelerations,
+        "definedObjects": sorted(defined_objects),
         "observedMacros": sorted(observed_macros),
         "observedCommands": sorted(observed_commands),
         "issues": issues,
