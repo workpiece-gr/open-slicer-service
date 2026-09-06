@@ -101,6 +101,14 @@ The final service runtime must independently be supplied as a digest-pinned exec
 
 CP5 does not implement or execute that publication step. The CI workflow has read-only repository permission, no package-write permission, no registry login, and no push command.
 
+## Pre-publication review handoff
+
+Before any approved registry publication, `.github/workflows/cp5-publication-review.yml` can build the exact candidate locally and emit a deterministic `fdm-toolchain-publication-review/1.0.0` packet. The packet binds the reviewed source commit, lock bytes, both CP5 Docker recipes, exact extracted manifest/package/runtime evidence, local candidate image IDs, and the intended repository/tag/platform.
+
+That packet is deliberately non-authoritative: it records that publication was not performed, no registry digest exists, production authority is not eligible, production enablement was not performed, and explicit publication approval is still required. Local Docker image IDs are retained only as candidate evidence and are explicitly not treated as registry manifest digests.
+
+See [`FDM_AUTHORITY_V2_CP5_PUBLICATION_REVIEW.md`](FDM_AUTHORITY_V2_CP5_PUBLICATION_REVIEW.md) for the review and later operator handoff sequence. The read-only review workflow does not authenticate to GHCR, push images, update the lock, deploy anything, or create physical-machine qualification evidence.
+
 ## Candidate integration gate
 
 The CP5 workflow:
