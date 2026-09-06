@@ -126,12 +126,14 @@ jobs:
           docker cp /tmp/cp3-generation-receipt.json workpiece-slicer:/tmp/cp3-generation-receipt.json
           set +e
           docker exec -i workpiece-slicer python - <<'PY'
+          import hashlib
           import json
           import os
           from pathlib import Path
 
           from app.fdm_exact_gcode import execute_exact_project_gcode
           from app.fdm_gcode_validator import validate_exact_gcode
+          from app.main import MATERIALS, build_process_profile
 
           receipt = json.loads(Path("/tmp/cp3-generation-receipt.json").read_text(encoding="utf-8"))
           exact = execute_exact_project_gcode(
@@ -142,14 +144,29 @@ jobs:
               generation_receipt=receipt,
               base_env=os.environ,
           )
+          process_path = Path("/tmp/cp3-exact-process.json")
+          build_process_profile(
+              Path("/app/profiles/process/pla.json"),
+              "balanced",
+              "functional",
+              process_path,
+              str(MATERIALS["pla"]["label"]),
+              automatic_supports=True,
+              project_reopen_safe=True,
+              single_colour_project=True,
+          )
           machine_bytes = Path("/app/profiles/machine.json").read_bytes()
+          process_bytes = process_path.read_bytes()
           filament_bytes = Path("/app/profiles/filament/pla.json").read_bytes()
+          assert hashlib.sha256(process_bytes).hexdigest() == exact["generation_receipt"]["profiles"]["process"]["sha256"]
+
           validations = []
           for plate in exact["plates"]:
               validation = validate_exact_gcode(
                   artifact=plate,
                   generation_receipt=exact["generation_receipt"],
                   machine_profile_bytes=machine_bytes,
+                  process_profile_bytes=process_bytes,
                   filament_profile_bytes=filament_bytes,
                   validator_service_commit=os.environ["SOURCE_COMMIT_SHA"],
                   toolchain_ref=f"ci://open-slicer-service/{os.environ['SOURCE_COMMIT_SHA']}",
