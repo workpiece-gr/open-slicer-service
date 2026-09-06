@@ -139,6 +139,26 @@ def _plate_bytes_map(value: Mapping[str | int, bytes] | Any) -> dict[str, bytes]
     return result
 
 
+def _resolve_plate_gcode(
+    supplied: Mapping[str, bytes],
+    *,
+    plate_id: str,
+    plate_index: int,
+) -> tuple[bytes, str]:
+    """Resolve one exact plate payload without accepting ambiguous aliases."""
+
+    aliases = {plate_id, str(plate_index)}
+    present = sorted(alias for alias in aliases if alias in supplied)
+    if not present:
+        raise FdmProductionBundleError(f"CP6 is missing exact G-code bytes for physical plate {plate_id}.")
+    if len(present) > 1:
+        raise FdmProductionBundleError(
+            f"CP6 received ambiguous G-code aliases for physical plate {plate_id}: {present}."
+        )
+    key = present[0]
+    return supplied[key], key
+
+
 def _verify_toolchain_retained_bytes(
     *,
     toolchain: Mapping[str, Any],
@@ -229,21 +249,22 @@ def build_fdm_production_bundle(
     if not isinstance(plate_items, list) or not plate_items:
         raise FdmProductionBundleError("CP6 requires at least one physical plate receipt.")
 
-    plates: list[tuple[int, str, Mapping[str, Any], bytes]] = []
+    plates: list[tuple[int, str, Mapping[str, Any], bytes, str]] = []
     seen_ids: set[str] = set()
     seen_indexes: set[int] = set()
+    consumed_gcode_keys: set[str] = set()
     for raw in plate_items:
         plate = _record(raw)
         plate_id = _text(plate.get("id"))
         index = plate.get("index")
         if not plate_id or plate_id in seen_ids or isinstance(index, bool) or not isinstance(index, int) or index < 1 or index in seen_indexes:
             raise FdmProductionBundleError("CP6 plate receipts require unique ids and unique positive indexes.")
-        payload = supplied_gcode.get(plate_id)
-        if payload is None:
-            # CP2/CP4 often use the numeric physical plate id as a transport key.
-            payload = supplied_gcode.get(str(index))
-        if payload is None:
-            raise FdmProductionBundleError(f"CP6 is missing exact G-code bytes for physical plate {plate_id}.")
+        payload, payload_key = _resolve_plate_gcode(supplied_gcode, plate_id=plate_id, plate_index=index)
+        if payload_key in consumed_gcode_keys:
+            raise FdmProductionBundleError(
+                f"CP6 G-code key {payload_key!r} would be consumed by more than one physical plate."
+            )
+        consumed_gcode_keys.add(payload_key)
         gcode = _record(plate.get("gcode"))
         original_gcode_name = _simple_filename(gcode.get("filename"), f"Plate {plate_id} G-code filename")
         if not original_gcode_name.lower().endswith(".gcode"):
@@ -253,10 +274,10 @@ def build_fdm_production_bundle(
             raise FdmProductionBundleError(f"Plate {plate_id} receipt is not bound to the exact production 3MF bytes.")
         seen_ids.add(plate_id)
         seen_indexes.add(index)
-        plates.append((index, plate_id, plate, payload))
+        plates.append((index, plate_id, plate, payload, original_gcode_name))
 
-    if set(supplied_gcode) - seen_ids - {str(index) for index in seen_indexes}:
-        raise FdmProductionBundleError("CP6 received G-code bytes for a plate not present in the production manifest.")
+    if set(supplied_gcode) != consumed_gcode_keys:
+        raise FdmProductionBundleError("CP6 received G-code bytes for a plate or alias not uniquely consumed by the production manifest.")
     plates.sort(key=lambda item: (item[0], item[1]))
 
     retained: list[tuple[str, bytes]] = [
@@ -273,12 +294,16 @@ def build_fdm_production_bundle(
     ]
 
     plate_file_map: dict[str, dict[str, str]] = {}
-    for index, plate_id, plate, payload in plates:
+    for index, plate_id, plate, payload, original_gcode_name in plates:
         archive_gcode = f"plates/plate-{index:03d}.gcode"
         validation_path = f"evidence/plates/plate-{index:03d}-validation.json"
         retained.append((archive_gcode, payload))
         retained.append((validation_path, _canonical_json(_record(plate.get("validation")))))
-        plate_file_map[plate_id] = {"gcode": archive_gcode, "validation": validation_path}
+        plate_file_map[plate_id] = {
+            "gcode": archive_gcode,
+            "validation": validation_path,
+            "originalGcodeFilename": original_gcode_name,
+        }
 
     names = [name for name, _ in retained]
     if len(names) != len(set(names)):
@@ -304,6 +329,7 @@ def build_fdm_production_bundle(
         },
         "instancePlateEvidencePath": "evidence/instance-plate.json",
         "plateFiles": plate_file_map,
+        "retainedMemberCount": len(retained) + 2,
         "productionEnablementPerformed": False,
     }
     manifest_payload = _canonical_json(bundle_manifest)
