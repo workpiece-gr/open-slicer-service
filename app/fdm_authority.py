@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .fdm_instance_plate_evidence import INSTANCE_PLATE_EVIDENCE_VERSION
+from .fdm_toolchain_provenance import FDM_TOOLCHAIN_LOCK_SCHEMA, FDM_TOOLCHAIN_PROVENANCE_VERSION
 
 FDM_JOB_CONTRACT_VERSION = "fdm-job/2.0.0"
 FDM_PRODUCTION_MANIFEST_VERSION = "fdm-production-manifest/2.0.0"
@@ -299,18 +300,48 @@ def evaluate_fdm_authority(value: Mapping[str, Any] | Any) -> AuthorityEvaluatio
 
     toolchain = _record(manifest.get("toolchain"))
     environment = _record(toolchain.get("executionEnvironment"))
-    runtime_ref = _text(environment.get("reference"))
+    runtime_ref = _text(environment.get("reference")).lower()
     runtime_digest = _text(environment.get("digest")).lower()
     ref_match, digest_match = _DIGEST_REF.fullmatch(runtime_ref), _DIGEST.fullmatch(runtime_digest)
+    toolchain_image = _record(toolchain.get("toolchainImage"))
+    toolchain_ref = _text(toolchain_image.get("reference")).lower()
+    toolchain_digest = _text(toolchain_image.get("digest")).lower()
+    toolchain_ref_match, toolchain_digest_match = _DIGEST_REF.fullmatch(toolchain_ref), _DIGEST.fullmatch(toolchain_digest)
+    base_ref = _text(_record(toolchain.get("baseImage")).get("reference")).lower()
+    base_ref_match = _DIGEST_REF.fullmatch(base_ref)
+    upstream_orca = _record(toolchain.get("upstreamOrca"))
+    release_asset_id = upstream_orca.get("releaseAssetId")
     if not (
-        _COMMIT.fullmatch(_text(toolchain.get("serviceCommit")).lower())
+        toolchain.get("contractVersion") == FDM_TOOLCHAIN_PROVENANCE_VERSION
+        and toolchain.get("authorityState") == AUTHORITY_PRODUCTION
+        and toolchain.get("authorityCriticalComplete") is True
+        and _COMMIT.fullmatch(_text(toolchain.get("serviceCommit")).lower())
         and _text(toolchain.get("orcaVersion"))
         and _sha(toolchain.get("orcaBinarySha256"))
         and ref_match
         and digest_match
         and ref_match.group(1) == digest_match.group(1)
+        and toolchain_ref_match
+        and toolchain_digest_match
+        and toolchain_ref_match.group(1) == toolchain_digest_match.group(1)
+        and _sha(toolchain.get("toolchainManifestSha256"))
+        and base_ref_match
+        and _text(upstream_orca.get("asset"))
+        and _sha(upstream_orca.get("assetSha256"))
+        and isinstance(release_asset_id, int)
+        and not isinstance(release_asset_id, bool)
+        and release_asset_id > 0
+        and _sha(toolchain.get("packageInventorySha256"))
+        and toolchain.get("lockSchema") == FDM_TOOLCHAIN_LOCK_SCHEMA
+        and toolchain.get("lockStatus") == "published"
+        and _sha(toolchain.get("lockSha256"))
     ):
-        _issue(issues, "missing_immutable_toolchain", "toolchain", "Exact service commit, Orca binary/version, and matching digest-pinned runtime are required.")
+        _issue(
+            issues,
+            "missing_immutable_toolchain",
+            "toolchain",
+            "Complete CP5 provenance is required: reviewed published toolchain digest, exact Orca/runtime evidence, and a matching digest-pinned final execution image.",
+        )
 
     machine = _record(manifest.get("machine"))
     machine_key = _text(machine.get("key"))
@@ -335,7 +366,7 @@ def evaluate_fdm_authority(value: Mapping[str, Any] | Any) -> AuthorityEvaluatio
     if not source_sha or _sha(project.get("sourceSha256")) != source_sha:
         _issue(issues, "project_source_mismatch", "project.sourceSha256", "Production 3MF must bind to immutable source SHA-256.")
     _profile_links(project.get("profileSha256"), profile_hashes, issues, "project.profileSha256", "project_profile_mismatch")
-    if not runtime_ref or _text(project.get("toolchainRef")) != runtime_ref:
+    if not runtime_ref or _text(project.get("toolchainRef")).lower() != runtime_ref:
         _issue(issues, "project_toolchain_mismatch", "project.toolchainRef", "Production 3MF must bind to the immutable runtime.")
 
     instance_items = manifest.get("instances") if isinstance(manifest.get("instances"), list) else []
@@ -384,7 +415,7 @@ def evaluate_fdm_authority(value: Mapping[str, Any] | Any) -> AuthorityEvaluatio
         if not project_sha or _sha(plate.get("projectSha256")) != project_sha:
             _issue(issues, "plate_project_mismatch", f"{path}.projectSha256", "Plate must bind to exact production 3MF.")
         _profile_links(plate.get("profileSha256"), profile_hashes, issues, f"{path}.profileSha256", "plate_profile_mismatch")
-        if not runtime_ref or _text(plate.get("toolchainRef")) != runtime_ref:
+        if not runtime_ref or _text(plate.get("toolchainRef")).lower() != runtime_ref:
             _issue(issues, "plate_toolchain_mismatch", f"{path}.toolchainRef", "Plate must bind to immutable runtime.")
 
         member_ids = plate.get("instanceIds") if isinstance(plate.get("instanceIds"), list) else []
@@ -420,7 +451,7 @@ def evaluate_fdm_authority(value: Mapping[str, Any] | Any) -> AuthorityEvaluatio
         if not project_sha or _sha(validation.get("projectSha256")) != project_sha:
             _issue(issues, "validator_project_mismatch", f"{path}.validation.projectSha256", "Validator receipt must bind to exact production 3MF.")
         _profile_links(validation.get("profileSha256"), profile_hashes, issues, f"{path}.validation.profileSha256", "validator_profile_mismatch")
-        if not runtime_ref or _text(validation.get("toolchainRef")) != runtime_ref:
+        if not runtime_ref or _text(validation.get("toolchainRef")).lower() != runtime_ref:
             _issue(issues, "validator_toolchain_mismatch", f"{path}.validation.toolchainRef", "Validator receipt must bind to immutable runtime.")
 
         stats = _record(plate.get("statistics"))
