@@ -6,8 +6,8 @@ technical production authority:
 
 * CP5 must be backed by the reviewed *published* immutable toolchain lock and a
   digest-pinned final execution image.
-* the selected physical RatRig/profile combination must have an explicit,
-  non-empty qualification evidence identifier supplied by configuration.
+* the selected physical RatRig/profile combination must have an immutable,
+  approved qualification receipt plus the exact retained physical-evidence bytes.
 
 This module still does not approve an order, bypass human review, publish an
 image, qualify a printer, deploy a service, or start fulfilment.
@@ -22,6 +22,7 @@ from typing import Any, Mapping
 
 from .fdm_authority import AUTHORITY_PRODUCTION, evaluate_fdm_authority
 from .fdm_authority_pipeline import FdmAuthorityPipelineError, build_fdm_authority_pipeline
+from .fdm_machine_qualification import FdmMachineQualificationError, validate_machine_qualification_receipt
 from .fdm_toolchain_provenance import build_toolchain_provenance
 
 FDM_AUTHORITY_PRODUCTION_API_VERSION = "fdm-authority-production/1.0.0"
@@ -49,10 +50,11 @@ def _request(generation_receipt: Mapping[str, Any]) -> Mapping[str, Any]:
     return value
 
 
-def _verify_profile_bytes(generation_receipt: Mapping[str, Any], profile_bytes: Mapping[str, bytes]) -> None:
+def _verify_profile_bytes(generation_receipt: Mapping[str, Any], profile_bytes: Mapping[str, bytes]) -> dict[str, str]:
     receipts = generation_receipt.get("profiles")
     if not isinstance(receipts, Mapping):
         raise ValueError("Authority v2 generation receipt lacks exact profile receipts.")
+    hashes: dict[str, str] = {}
     for kind in ("machine", "process", "filament"):
         payload = profile_bytes.get(kind)
         receipt = receipts.get(kind)
@@ -63,6 +65,8 @@ def _verify_profile_bytes(generation_receipt: Mapping[str, Any], profile_bytes: 
         expected = str(receipt.get("sha256") or "").strip().lower()
         if hashlib.sha256(payload).hexdigest() != expected:
             raise ValueError(f"Exact {kind} profile bytes do not match the project generation receipt.")
+        hashes[kind] = expected
+    return hashes
 
 
 def build_fdm_authority_production(
@@ -83,6 +87,8 @@ def build_fdm_authority_production(
     package_inventory_bytes: bytes,
     orca_runtime_bytes: bytes,
     base_env: Mapping[str, str],
+    machine_qualification_receipt_bytes: bytes | None = None,
+    machine_qualification_evidence_bytes: bytes | None = None,
 ) -> FdmAuthorityProductionResult:
     """Build one production-authoritative RatRig evidence package and price.
 
@@ -92,8 +98,6 @@ def build_fdm_authority_production(
     """
 
     qualification_id = machine_qualification_evidence_id.strip() if isinstance(machine_qualification_evidence_id, str) else ""
-    if not qualification_id:
-        raise ValueError("Production FDM authority requires an explicit machine qualification evidence id.")
     if not source_path.is_file() or source_path.stat().st_size < 1:
         raise ValueError("Production FDM authority requires the exact immutable source STL bytes.")
     if not project_path.is_file() or project_path.stat().st_size < 1:
@@ -122,7 +126,22 @@ def build_fdm_authority_production(
         "process": process_profile_bytes,
         "filament": filament_profile_bytes,
     }
-    _verify_profile_bytes(generation_receipt, profile_bytes)
+    profile_hashes = _verify_profile_bytes(generation_receipt, profile_bytes)
+    if not isinstance(machine_qualification_receipt_bytes, bytes) or not isinstance(machine_qualification_evidence_bytes, bytes):
+        raise ValueError("Production FDM authority requires exact machine qualification receipt and physical-evidence bytes.")
+    try:
+        qualification = validate_machine_qualification_receipt(
+            receipt_bytes=machine_qualification_receipt_bytes,
+            evidence_bytes=machine_qualification_evidence_bytes,
+            expected_printer_key=RATRIG_PRINTER_KEY,
+            expected_request={"material": material, "quality": quality, "strength": strength},
+            expected_profile_sha256=profile_hashes,
+        )
+    except FdmMachineQualificationError as exc:
+        raise ValueError(str(exc)) from exc
+    if qualification_id and qualification_id != qualification["qualificationId"]:
+        raise ValueError("Configured machine qualification evidence id differs from the immutable qualification receipt.")
+    qualification_id = qualification["qualificationId"]
 
     # This is intentionally evaluated before any CP2/Orca reopen work. The
     # committed lock must already describe a reviewed, published immutable
@@ -165,6 +184,8 @@ def build_fdm_authority_production(
             timeout_seconds=timeout_seconds,
             review_status="pending",
             require_production_authority=True,
+            machine_qualification_receipt_bytes=machine_qualification_receipt_bytes,
+            machine_qualification_evidence_bytes=machine_qualification_evidence_bytes,
         )
     except FdmAuthorityPipelineError as exc:
         raise ValueError(str(exc)) from exc

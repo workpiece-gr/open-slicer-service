@@ -16,6 +16,7 @@ from app.fdm_authority import (
     FDM_PRODUCTION_MANIFEST_VERSION,
 )
 from app.fdm_instance_plate_evidence import INSTANCE_PLATE_EVIDENCE_VERSION
+from app.fdm_machine_qualification import validate_machine_qualification_receipt
 from app.fdm_production_bundle import (
     FDM_PRODUCTION_BUNDLE_LAYOUT,
     FDM_PRODUCTION_BUNDLE_VERSION,
@@ -87,6 +88,37 @@ def retained_fixture(*, published: bool = True, qualified: bool = True) -> dict:
     toolchain_manifest_bytes = canonical(toolchain_manifest)
 
     profile_hashes = {"machine": sha(machine), "process": sha(process), "filament": sha(filament)}
+    qualification_evidence_bytes = b"real physical qualification evidence fixture\n"
+    qualification_receipt_bytes = canonical(
+        {
+            "contractVersion": "fdm-machine-qualification/1.0.0",
+            "productionReady": True,
+            "qualificationId": "test-only-qualification-state",
+            "protocolId": "workpiece-ratrig-qualification-v1",
+            "printerKey": "ratrig_vcore3_300",
+            "request": {"material": "pla", "quality": "balanced", "strength": "functional"},
+            "profileSha256": dict(profile_hashes),
+            "evidence": {
+                "filename": "qualification-evidence.txt",
+                "mediaType": "text/plain",
+                "bytes": len(qualification_evidence_bytes),
+                "sha256": sha(qualification_evidence_bytes),
+            },
+            "review": {
+                "status": "approved",
+                "reviewerId": "workpiece-test-reviewer",
+                "completedAt": "2026-09-06T00:00:00Z",
+            },
+        }
+    )
+    qualification_summary = validate_machine_qualification_receipt(
+        receipt_bytes=qualification_receipt_bytes,
+        evidence_bytes=qualification_evidence_bytes,
+        expected_printer_key="ratrig_vcore3_300",
+        expected_request={"material": "pla", "quality": "balanced", "strength": "functional"},
+        expected_profile_sha256=profile_hashes,
+    )
+    qualification_summary = {**qualification_summary, "evidenceId": qualification_summary["qualificationId"]}
     gcode_sha = sha(gcode)
     project_sha = sha(project)
     source_sha = sha(source)
@@ -173,7 +205,7 @@ def retained_fixture(*, published: bool = True, qualified: bool = True) -> dict:
         "source": {"filename": "fixture.stl", "bytes": len(source), "sha256": source_sha, "immutable": True},
         "machine": {
             "key": "ratrig_vcore3_300",
-            "qualification": {"productionReady": qualified, "evidenceId": "test-only-qualification-state"},
+            "qualification": qualification_summary if qualified else {"productionReady": False, "evidenceId": "test-only-qualification-state"},
         },
         "profiles": {
             "machine": {"identity": "ratrig_vcore3_300:machine", "sha256": profile_hashes["machine"]},
@@ -225,6 +257,10 @@ def retained_fixture(*, published: bool = True, qualified: bool = True) -> dict:
         "toolchain_lock_bytes": lock_bytes,
         "toolchain_manifest_bytes": toolchain_manifest_bytes,
         "package_inventory_bytes": package_inventory,
+        **({
+            "machine_qualification_receipt_bytes": qualification_receipt_bytes,
+            "machine_qualification_evidence_bytes": qualification_evidence_bytes,
+        } if qualified else {}),
     }
 
 
@@ -254,6 +290,8 @@ def test_authoritative_bundle_is_byte_for_byte_deterministic_and_self_indexed():
             "toolchain/packages.txt",
             "evidence/toolchain-receipt.json",
             "evidence/instance-plate.json",
+            "evidence/machine-qualification-receipt.json",
+            "evidence/machine-qualification/qualification-evidence.txt",
             "plates/plate-001.gcode",
             "evidence/plates/plate-001-validation.json",
             "manifest.json",
@@ -274,7 +312,7 @@ def test_authoritative_bundle_is_byte_for_byte_deterministic_and_self_indexed():
 
     assert first.manifest_sha256 == sha(first.manifest_bytes)
     assert first.index_sha256 == sha(first.index_bytes)
-    assert first.member_count == 14
+    assert first.member_count == 16
 
 
 @pytest.mark.parametrize(
@@ -289,6 +327,20 @@ def test_exact_retained_member_mutation_fails_closed(field, mutate):
     fixture = retained_fixture()
     fixture[field] = mutate(fixture[field])
     with pytest.raises(FdmProductionBundleError):
+        build(fixture)
+
+
+def test_machine_qualification_evidence_mutation_fails_closed():
+    fixture = retained_fixture()
+    fixture["machine_qualification_evidence_bytes"] += b"drift"
+    with pytest.raises(FdmProductionBundleError, match="qualification physical evidence"):
+        build(fixture)
+
+
+def test_machine_qualification_receipt_mutation_fails_closed():
+    fixture = retained_fixture()
+    fixture["machine_qualification_receipt_bytes"] += b" "
+    with pytest.raises(FdmProductionBundleError, match="qualification receipt"):
         build(fixture)
 
 

@@ -197,6 +197,8 @@ def build_fdm_production_bundle(
     toolchain_lock_bytes: bytes,
     toolchain_manifest_bytes: bytes,
     package_inventory_bytes: bytes,
+    machine_qualification_receipt_bytes: bytes | None = None,
+    machine_qualification_evidence_bytes: bytes | None = None,
     require_production_authority: bool = True,
 ) -> FdmProductionBundleResult:
     """Hash-verify retained FDM evidence and create one deterministic ZIP.
@@ -210,6 +212,32 @@ def build_fdm_production_bundle(
     if not isinstance(manifest, Mapping):
         raise FdmProductionBundleError("CP6 requires an FDM production manifest object.")
     authority_state = _authority_state(manifest, require_production_authority=require_production_authority)
+
+    qualification_paths: dict[str, str] | None = None
+    if authority_state == AUTHORITY_PRODUCTION:
+        qualification = _record(_record(manifest.get("machine")).get("qualification"))
+        _exact_bytes(
+            "machine qualification receipt",
+            machine_qualification_receipt_bytes,
+            qualification.get("receiptSha256"),
+            qualification.get("receiptBytes"),
+        )
+        qualification_evidence = _record(qualification.get("evidence"))
+        evidence_name = _simple_filename(qualification_evidence.get("filename"), "Machine qualification evidence filename")
+        _exact_bytes(
+            "machine qualification physical evidence",
+            machine_qualification_evidence_bytes,
+            qualification_evidence.get("sha256"),
+            qualification_evidence.get("bytes"),
+        )
+        qualification_paths = {
+            "receipt": "evidence/machine-qualification-receipt.json",
+            "physicalEvidence": f"evidence/machine-qualification/{evidence_name}",
+        }
+    elif machine_qualification_receipt_bytes is not None or machine_qualification_evidence_bytes is not None:
+        raise FdmProductionBundleError(
+            "Candidate CP6 bundles must not retain production-only machine qualification bytes."
+        )
 
     source = _record(manifest.get("source"))
     source_name = _simple_filename(source.get("filename"), "Production source filename")
@@ -294,6 +322,13 @@ def build_fdm_production_bundle(
         ("evidence/toolchain-receipt.json", _canonical_json(toolchain)),
         ("evidence/instance-plate.json", _canonical_json(_record(manifest.get("instancePlateEvidence")))),
     ]
+    if qualification_paths is not None:
+        retained.extend(
+            [
+                (qualification_paths["receipt"], machine_qualification_receipt_bytes),
+                (qualification_paths["physicalEvidence"], machine_qualification_evidence_bytes),
+            ]
+        )
 
     plate_file_map: dict[str, dict[str, str]] = {}
     for index, plate_id, plate, payload, original_gcode_name in plates:
@@ -334,6 +369,8 @@ def build_fdm_production_bundle(
         "retainedMemberCount": len(retained) + 2,
         "productionEnablementPerformed": False,
     }
+    if qualification_paths is not None:
+        bundle_manifest["bundle"]["machineQualificationPaths"] = dict(qualification_paths)
     manifest_payload = _canonical_json(bundle_manifest)
     retained.append(("manifest.json", manifest_payload))
 

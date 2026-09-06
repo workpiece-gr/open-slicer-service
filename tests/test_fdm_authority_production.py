@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,13 +35,33 @@ def _paths(tmp_path: Path) -> tuple[Path, Path, dict[str, bytes]]:
 
 def _kwargs(tmp_path: Path) -> dict:
     source, project, profiles = _paths(tmp_path)
+    generation_receipt = _receipt(profiles)
+    profile_hashes = {kind: hashlib.sha256(payload).hexdigest() for kind, payload in profiles.items()}
+    evidence_bytes = b"real physical qualification evidence fixture\n"
+    receipt = {
+        "contractVersion": "fdm-machine-qualification/1.0.0",
+        "productionReady": True,
+        "qualificationId": "qualification-record-123",
+        "protocolId": "workpiece-ratrig-qualification-v1",
+        "printerKey": "ratrig_vcore3_300",
+        "request": {"material": "pla", "quality": "balanced", "strength": "functional"},
+        "profileSha256": profile_hashes,
+        "evidence": {
+            "filename": "qualification-evidence.txt",
+            "mediaType": "text/plain",
+            "bytes": len(evidence_bytes),
+            "sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+        },
+        "review": {"status": "approved", "reviewerId": "workpiece-test-reviewer", "completedAt": "2026-09-06T00:00:00Z"},
+    }
+    receipt_bytes = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode()
     return {
         "source_path": source,
         "project_path": project,
         "machine_profile_bytes": profiles["machine"],
         "process_profile_bytes": profiles["process"],
         "filament_profile_bytes": profiles["filament"],
-        "generation_receipt": _receipt(profiles),
+        "generation_receipt": generation_receipt,
         "orca_bin": tmp_path / "orca",
         "timeout_seconds": 1,
         "service_commit": "a" * 40,
@@ -51,13 +72,22 @@ def _kwargs(tmp_path: Path) -> dict:
         "package_inventory_bytes": b"packages",
         "orca_runtime_bytes": b"orca",
         "base_env": {},
+        "machine_qualification_receipt_bytes": receipt_bytes,
+        "machine_qualification_evidence_bytes": evidence_bytes,
     }
 
 
-def test_production_authority_requires_explicit_machine_qualification_before_other_work(tmp_path: Path):
+def test_production_authority_requires_exact_machine_qualification_receipt_before_other_work(tmp_path: Path):
     values = _kwargs(tmp_path)
-    values["machine_qualification_evidence_id"] = "   "
-    with pytest.raises(ValueError, match="machine qualification evidence id"):
+    values["machine_qualification_receipt_bytes"] = None
+    with pytest.raises(ValueError, match="qualification receipt and physical-evidence bytes"):
+        production.build_fdm_authority_production(**values)
+
+
+def test_production_authority_rejects_free_form_id_that_disagrees_with_receipt(tmp_path: Path):
+    values = _kwargs(tmp_path)
+    values["machine_qualification_evidence_id"] = "different-record"
+    with pytest.raises(ValueError, match="differs from the immutable qualification receipt"):
         production.build_fdm_authority_production(**values)
 
 
@@ -119,6 +149,8 @@ def test_production_policy_requires_and_preserves_full_technical_authority(monke
     assert "candidate_toolchain_image_ref" not in captured["toolchain"]
     assert captured["pipeline"]["machine_production_ready"] is True
     assert captured["pipeline"]["machine_qualification_evidence_id"] == "qualification-record-123"
+    assert captured["pipeline"]["machine_qualification_receipt_bytes"] == values["machine_qualification_receipt_bytes"]
+    assert captured["pipeline"]["machine_qualification_evidence_bytes"] == values["machine_qualification_evidence_bytes"]
     assert captured["pipeline"]["require_production_authority"] is True
     assert captured["pipeline"]["review_status"] == "pending"
     assert result.authority_state == AUTHORITY_PRODUCTION
@@ -150,13 +182,18 @@ def test_production_api_uses_independent_token(monkeypatch):
     assert caught.value.status_code == 401
 
 
-def test_production_health_rejects_current_unpublished_lock_without_exposing_qualification_value(monkeypatch):
+def test_production_health_requires_qualification_receipt_and_evidence_files(monkeypatch, tmp_path: Path):
+    receipt = tmp_path / "qualification.json"
+    evidence = tmp_path / "qualification-evidence.bin"
+    receipt.write_bytes(b"receipt")
+    evidence.write_bytes(b"evidence")
     monkeypatch.setattr(production_api, "FDM_TOOLCHAIN_LOCK", Path("fdm-toolchain.lock.json"))
-    monkeypatch.setattr(production_api, "WORKPIECE_FDM_MACHINE_QUALIFICATION_EVIDENCE_ID", "secret-qualification-record")
+    monkeypatch.setattr(production_api, "FDM_MACHINE_QUALIFICATION_RECEIPT", receipt)
+    monkeypatch.setattr(production_api, "FDM_MACHINE_QUALIFICATION_EVIDENCE", evidence)
     status = production_api.production_config_status()
     assert status["published_toolchain_lock"] is False
+    assert status["machine_qualification_receipt"] is True
     assert status["machine_qualification_evidence"] is True
-    assert "secret-qualification-record" not in repr(status)
 
 
 def test_production_entrypoint_does_not_replace_normal_or_candidate_apps():

@@ -47,12 +47,12 @@ The repository's current committed toolchain lock is intentionally
 preconditions are incomplete. Do not change that status or add a digest until
 the real immutable image has been published and reviewed.
 
-Likewise, the machine qualification evidence ID must come from a real physical
-qualification record. It must never be invented to make software authority pass.
+Likewise, production machine qualification now requires two exact retained files: a canonical `fdm-machine-qualification/1.0.0` receipt and the physical-evidence artifact hashed by that receipt. The receipt binds the RatRig, material/quality/strength selection, exact machine/process/filament profile SHA-256 values, qualification protocol/review metadata, and evidence SHA/byte count. A free-form evidence ID is not sufficient and must never be invented to make software authority pass.
 
 Current production qualification configuration:
 
-- `WORKPIECE_FDM_MACHINE_QUALIFICATION_EVIDENCE_ID`
+- `FDM_MACHINE_QUALIFICATION_RECEIPT` (path to the exact canonical receipt JSON)
+- `FDM_MACHINE_QUALIFICATION_EVIDENCE` (path to the exact physical-evidence artifact referenced by the receipt)
 
 ## Human review remains separate
 

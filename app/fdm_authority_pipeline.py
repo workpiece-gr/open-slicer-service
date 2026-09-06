@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from .fdm_authority import AUTHORITY_PRODUCTION, evaluate_fdm_authority
 from .fdm_exact_gcode import execute_exact_project_gcode
 from .fdm_instance_plate_evidence import build_instance_plate_evidence
+from .fdm_machine_qualification import FdmMachineQualificationError, validate_machine_qualification_receipt
 from .fdm_pricing import price_exact_fdm_job
 from .fdm_production_bundle import FdmProductionBundleResult, build_fdm_production_bundle
 from .fdm_profile_driven_gcode import validate_profile_driven_gcode
@@ -163,6 +164,8 @@ def build_fdm_authority_pipeline(
     timeout_seconds: int = 300,
     review_status: str = "pending",
     require_production_authority: bool = False,
+    machine_qualification_receipt_bytes: bytes | None = None,
+    machine_qualification_evidence_bytes: bytes | None = None,
 ) -> FdmAuthorityPipelineResult:
     """Build exact CP2-CP7 evidence from an already-retained production 3MF.
 
@@ -211,6 +214,35 @@ def build_fdm_authority_pipeline(
 
     profile_hashes = _verify_profile_bytes(generation_receipt, profile_bytes)
     normalized_profiles = {kind: bytes(profile_bytes[kind]) for kind in ("machine", "process", "filament")}
+
+    qualification_manifest: dict[str, Any] = {
+        "productionReady": False,
+        "evidenceId": qualification_evidence,
+    }
+    if machine_production_ready:
+        if not isinstance(machine_qualification_receipt_bytes, bytes) or not isinstance(machine_qualification_evidence_bytes, bytes):
+            raise FdmAuthorityPipelineError(
+                "Production-ready machine authority requires exact qualification receipt and physical-evidence bytes."
+            )
+        try:
+            qualification = validate_machine_qualification_receipt(
+                receipt_bytes=machine_qualification_receipt_bytes,
+                evidence_bytes=machine_qualification_evidence_bytes,
+                expected_printer_key=printer_key,
+                expected_request={"material": material, "quality": quality, "strength": strength},
+                expected_profile_sha256=profile_hashes,
+            )
+        except FdmMachineQualificationError as exc:
+            raise FdmAuthorityPipelineError(str(exc)) from exc
+        if qualification["qualificationId"] != qualification_evidence:
+            raise FdmAuthorityPipelineError(
+                "Machine qualification evidence id does not match the immutable qualification receipt."
+            )
+        qualification_manifest = {**qualification, "evidenceId": qualification["qualificationId"]}
+    elif machine_qualification_receipt_bytes is not None or machine_qualification_evidence_bytes is not None:
+        raise FdmAuthorityPipelineError(
+            "Candidate machine state must not attach production qualification receipt/evidence bytes."
+        )
     runtime_ref = _text(_record(toolchain_receipt.get("executionEnvironment")).get("reference"))
     if not runtime_ref:
         raise FdmAuthorityPipelineError("The CP5 toolchain receipt lacks an execution-environment reference.")
@@ -351,10 +383,7 @@ def build_fdm_authority_pipeline(
         },
         "machine": {
             "key": printer_key,
-            "qualification": {
-                "productionReady": machine_production_ready,
-                "evidenceId": qualification_evidence,
-            },
+            "qualification": qualification_manifest,
         },
         "profiles": dict(exact["generation_receipt"]["profiles"]),
         "toolchain": dict(toolchain_receipt),
@@ -398,6 +427,8 @@ def build_fdm_authority_pipeline(
         toolchain_lock_bytes=toolchain_lock_bytes,
         toolchain_manifest_bytes=toolchain_manifest_bytes,
         package_inventory_bytes=package_inventory_bytes,
+        machine_qualification_receipt_bytes=machine_qualification_receipt_bytes,
+        machine_qualification_evidence_bytes=machine_qualification_evidence_bytes,
         require_production_authority=require_production_authority,
     )
     pricing_receipt = price_exact_fdm_job(

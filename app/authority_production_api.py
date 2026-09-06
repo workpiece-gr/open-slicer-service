@@ -3,9 +3,9 @@
 This app is intentionally distinct from both ``app.main:app`` and the candidate
 Authority-v2 app. Merely merging this module cannot expose a route. A deployment
 must deliberately start this app, enable its independent flag/token, run from a
-digest-pinned image, use a committed *published* CP5 lock, and configure a real
-machine-qualification evidence id before a request can reach the authority
-pipeline.
+digest-pinned image, use a committed *published* CP5 lock, and mount the exact
+machine-qualification receipt plus its retained physical-evidence artifact before
+a request can reach the authority pipeline.
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ from .main import MATERIALS, MAX_PROJECT_QUANTITY, ORCA_BIN, SERVICE_COMMIT_SHA,
 ENABLE_FDM_AUTHORITY_V2_PRODUCTION_API = os.getenv("ENABLE_FDM_AUTHORITY_V2_PRODUCTION_API", "0").strip().lower() in {"1", "true", "yes"}
 WORKPIECE_FDM_AUTHORITY_V2_PRODUCTION_TOKEN = os.getenv("WORKPIECE_FDM_AUTHORITY_V2_PRODUCTION_TOKEN", "").strip()
 WORKPIECE_FDM_AUTHORITY_RUNTIME_REF = os.getenv("WORKPIECE_FDM_AUTHORITY_RUNTIME_REF", "").strip().lower()
-WORKPIECE_FDM_MACHINE_QUALIFICATION_EVIDENCE_ID = os.getenv("WORKPIECE_FDM_MACHINE_QUALIFICATION_EVIDENCE_ID", "").strip()
+FDM_MACHINE_QUALIFICATION_RECEIPT = Path(os.getenv("FDM_MACHINE_QUALIFICATION_RECEIPT", "/app/fdm-machine-qualification.json"))
+FDM_MACHINE_QUALIFICATION_EVIDENCE = Path(os.getenv("FDM_MACHINE_QUALIFICATION_EVIDENCE", "/app/fdm-machine-qualification-evidence.bin"))
 AUTHORITY_QUEUE_TIMEOUT_SECONDS = max(1, int(os.getenv("FDM_AUTHORITY_V2_QUEUE_TIMEOUT_SECONDS", "30")))
 MAX_AUTHORITY_BUNDLE_BYTES = max(1, int(os.getenv("MAX_FDM_AUTHORITY_BUNDLE_BYTES", str(150 * 1024 * 1024))))
 FDM_TOOLCHAIN_LOCK = Path(os.getenv("FDM_TOOLCHAIN_LOCK", "/app/fdm-toolchain.lock.json"))
@@ -65,7 +66,8 @@ def production_config_status() -> dict[str, bool]:
         "service_commit": bool(_COMMIT.fullmatch(SERVICE_COMMIT_SHA.lower())),
         "runtime_digest_ref": bool(_DIGEST_REF.fullmatch(WORKPIECE_FDM_AUTHORITY_RUNTIME_REF)),
         "published_toolchain_lock": _published_lock_ready(),
-        "machine_qualification_evidence": bool(WORKPIECE_FDM_MACHINE_QUALIFICATION_EVIDENCE_ID),
+        "machine_qualification_receipt": FDM_MACHINE_QUALIFICATION_RECEIPT.is_file(),
+        "machine_qualification_evidence": FDM_MACHINE_QUALIFICATION_EVIDENCE.is_file(),
         "orca_runtime": ORCA_BIN.is_file(),
         "ratrig_profiles": profiles_ready(),
         "toolchain_manifest": FDM_TOOLCHAIN_MANIFEST.is_file(),
@@ -92,6 +94,7 @@ def production_access(authorization: Annotated[str | None, Header()] = None):
         "service_commit",
         "runtime_digest_ref",
         "published_toolchain_lock",
+        "machine_qualification_receipt",
         "machine_qualification_evidence",
         "orca_runtime",
         "ratrig_profiles",
@@ -186,12 +189,14 @@ async def build_authority_production(
                 timeout_seconds=SLICE_TIMEOUT_SECONDS,
                 service_commit=SERVICE_COMMIT_SHA.lower(),
                 runtime_image_ref=WORKPIECE_FDM_AUTHORITY_RUNTIME_REF,
-                machine_qualification_evidence_id=WORKPIECE_FDM_MACHINE_QUALIFICATION_EVIDENCE_ID,
+                machine_qualification_evidence_id="",
                 toolchain_lock_bytes=FDM_TOOLCHAIN_LOCK.read_bytes(),
                 toolchain_manifest_bytes=FDM_TOOLCHAIN_MANIFEST.read_bytes(),
                 package_inventory_bytes=FDM_PACKAGE_INVENTORY.read_bytes(),
                 orca_runtime_bytes=ORCA_BIN.read_bytes(),
                 base_env=os.environ,
+                machine_qualification_receipt_bytes=FDM_MACHINE_QUALIFICATION_RECEIPT.read_bytes(),
+                machine_qualification_evidence_bytes=FDM_MACHINE_QUALIFICATION_EVIDENCE.read_bytes(),
             )
         except (OSError, ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=422, detail=f"Production FDM Authority v2 failed closed: {exc}") from exc
