@@ -27,6 +27,7 @@ _AXIS_RE = re.compile(r"([XYZEFS])([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?
 _MACRO_ARG_RE = re.compile(r"\b([A-Z][A-Z0-9_]*)=([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\b")
 
 _ALLOWED_G = {"G0", "G1", "G4", "G10", "G11", "G21", "G28", "G90", "G91", "G92"}
+_HANDLED_M = {"M82", "M83", "M104", "M109", "M140", "M190", "M200"}
 _FORBIDDEN_M = {"M112", "M206", "M500", "M501", "M502", "M524", "M997", "M999"}
 _FORBIDDEN_MACROS = {"FIRMWARE_RESTART", "RESTART", "RUN_SHELL_COMMAND", "SAVE_CONFIG"}
 _PROFILE_KINDS = ("machine", "process", "filament")
@@ -123,14 +124,8 @@ def _macro_tokens(profile: Mapping[str, Any]) -> set[str]:
     return result
 
 
-def build_validation_policy(
-    *,
-    printer_key: str,
-    machine_profile_bytes: bytes,
-    filament_profile_bytes: bytes,
-) -> dict[str, Any]:
+def build_validation_policy(*, printer_key: str, machine_profile_bytes: bytes, filament_profile_bytes: bytes) -> dict[str, Any]:
     """Build validator policy only from exact profile bytes supplied by caller."""
-
     machine = _profile_json(machine_profile_bytes, "machine")
     filament = _profile_json(filament_profile_bytes, "filament")
     width, depth = _parse_printable_area(machine.get("printable_area"))
@@ -156,11 +151,9 @@ def build_validation_policy(
     macros = _macro_tokens(machine) | _macro_tokens(filament)
     if macros & _FORBIDDEN_MACROS:
         raise ValueError("An exact profile requests a macro that CP3 forbids for authority.")
-
     flavor = _text(machine.get("gcode_flavor")).lower()
     if not flavor:
         raise ValueError("The machine profile does not declare gcode_flavor.")
-
     return {
         "printerKey": printer_key,
         "gcodeFlavor": flavor,
@@ -179,16 +172,11 @@ def _issue(issues: list[dict[str, Any]], code: str, line: int | None, message: s
 
 
 def validate_exact_gcode(
-    *,
-    artifact: Mapping[str, Any] | Any,
-    generation_receipt: Mapping[str, Any] | Any,
-    machine_profile_bytes: bytes,
-    filament_profile_bytes: bytes,
-    validator_service_commit: str,
-    toolchain_ref: str,
+    *, artifact: Mapping[str, Any] | Any, generation_receipt: Mapping[str, Any] | Any,
+    machine_profile_bytes: bytes, filament_profile_bytes: bytes,
+    validator_service_commit: str, toolchain_ref: str,
 ) -> dict[str, Any]:
     """Validate exact CP2 G-code bytes without invoking OrcaSlicer."""
-
     artifact = _record(artifact)
     generation = _record(generation_receipt)
     source = _record(generation.get("source"))
@@ -210,11 +198,9 @@ def validate_exact_gcode(
     generation_project_sha = _sha(project.get("sha256"))
     if not project_sha or project_sha != generation_project_sha:
         _issue(issues, "project_sha256_mismatch", None, "CP2 artifact and generation receipt disagree on the production 3MF.")
-
     source_sha = _sha(source.get("sha256"))
     if _sha(artifact.get("source_sha256")) != source_sha:
         _issue(issues, "source_sha256_mismatch", None, "CP2 artifact and generation receipt disagree on the immutable source.")
-
     if _text(artifact.get("orca_version")) != _text(engine.get("version")):
         _issue(issues, "orca_version_mismatch", None, "CP2 artifact Orca version differs from the generation receipt.")
     if _text(artifact.get("service_commit")).lower() != _text(engine.get("service_commit")).lower():
@@ -229,7 +215,6 @@ def validate_exact_gcode(
             _issue(issues, "profile_sha256_mismatch", None, f"{kind} profile hash is not bound to the generation receipt.")
         if expected:
             profile_hashes[kind] = expected
-
     if profile_hashes.get("machine") and _digest(machine_profile_bytes) != profile_hashes["machine"]:
         _issue(issues, "machine_profile_bytes_mismatch", None, "Exact machine profile bytes do not match the generation SHA-256.")
     if profile_hashes.get("filament") and _digest(filament_profile_bytes) != profile_hashes["filament"]:
@@ -240,8 +225,8 @@ def validate_exact_gcode(
         _issue(issues, "printer_mismatch", None, "CP2 artifact printer key differs from the generation receipt.")
 
     policy: dict[str, Any] | None = None
-    blocking_profile_codes = {"machine_profile_bytes_mismatch", "filament_profile_bytes_mismatch"}
-    if not any(issue["code"] in blocking_profile_codes for issue in issues):
+    blocking = {"machine_profile_bytes_mismatch", "filament_profile_bytes_mismatch"}
+    if not any(issue["code"] in blocking for issue in issues):
         try:
             policy = build_validation_policy(
                 printer_key=printer_key,
@@ -269,6 +254,7 @@ def validate_exact_gcode(
     bounds_min = [math.inf, math.inf, math.inf]
     bounds_max = [-math.inf, -math.inf, -math.inf]
     observed_macros: set[str] = set()
+    observed_commands: set[str] = set()
     nozzle_targets: list[float] = []
     bed_targets: list[float] = []
 
@@ -282,11 +268,11 @@ def validate_exact_gcode(
         if not code:
             continue
         token = code.split(None, 1)[0].upper()
+        observed_commands.add(token)
 
         if token in _FORBIDDEN_MACROS or token in _FORBIDDEN_M:
             _issue(issues, "forbidden_command", line_number, f"{token} is forbidden by the Workpiece validator.")
             continue
-
         if _is_macro(token):
             observed_macros.add(token)
             if token not in allowed_macros:
@@ -299,12 +285,10 @@ def validate_exact_gcode(
                 if "BED_TEMP" in args:
                     bed_targets.append(args["BED_TEMP"])
             continue
-
         if _TOOL_TOKEN_RE.fullmatch(token):
             if token != "T0":
                 _issue(issues, "unsupported_tool_change", line_number, "CP3 currently validates only single-tool FDM G-code.")
             continue
-
         if token.startswith("G"):
             if token not in _ALLOWED_G:
                 _issue(issues, "unsupported_g_command", line_number, f"{token} can affect motion semantics and is not independently proven by CP3.")
@@ -335,9 +319,7 @@ def validate_exact_gcode(
                     return current
                 if xyz_absolute:
                     return values[axis]
-                if current is None:
-                    return None
-                return current + values[axis]
+                return None if current is None else current + values[axis]
 
             nx, ny, nz = next_axis(x, "X"), next_axis(y, "Y"), next_axis(z, "Z")
             ne = values.get("E", e) if e_absolute else e + values.get("E", 0.0)
@@ -347,13 +329,13 @@ def validate_exact_gcode(
                     _issue(issues, "unknown_extrusion_coordinate", line_number, "Extrusion occurred before XYZ position was independently known.")
                 elif envelope:
                     coords = ((float(x), float(y), float(z)), (float(nx), float(ny), float(nz)))
-                    outside = False
-                    for point in coords:
-                        if any(value < 0 or value > float(limit) for value, limit in zip(point, envelope, strict=True)):
-                            outside = True
-                            _issue(issues, "extrusion_outside_envelope", line_number, "An extrusion move leaves the exact profile printable envelope.")
-                            break
-                    if not outside:
+                    outside = any(
+                        any(value < 0 or value > float(limit) for value, limit in zip(point, envelope, strict=True))
+                        for point in coords
+                    )
+                    if outside:
+                        _issue(issues, "extrusion_outside_envelope", line_number, "An extrusion move leaves the exact profile printable envelope.")
+                    else:
                         extrusion_count += 1
                         for point in coords:
                             for index, value in enumerate(point):
@@ -362,6 +344,9 @@ def validate_exact_gcode(
             x, y, z, e = nx, ny, nz, ne
             continue
 
+        if token.startswith("M") and token not in _HANDLED_M:
+            _issue(issues, "unsupported_m_command", line_number, f"{token} is not independently classified by CP3.")
+            continue
         if token == "M82":
             e_absolute = True
         elif token == "M83":
@@ -416,5 +401,6 @@ def validate_exact_gcode(
         "motion": {"extrusionSegmentCount": extrusion_count, "extrusionBoundsMm": bounds},
         "temperatures": {"nozzleTargetsC": nozzle_targets, "bedTargetsC": bed_targets},
         "observedMacros": sorted(observed_macros),
+        "observedCommands": sorted(observed_commands),
         "issues": issues,
     }
