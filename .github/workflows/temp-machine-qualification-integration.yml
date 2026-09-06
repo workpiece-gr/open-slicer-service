@@ -1,0 +1,31 @@
+name: Temporary machine qualification integration
+
+on:
+  push:
+    branches:
+      - chris/fdm-v2-machine-qualification-receipt
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply focused integration patch
+        run: python scripts/apply_machine_qualification_integration.py
+      - name: Remove temporary patch tooling
+        run: |
+          git rm scripts/apply_machine_qualification_integration.py
+          git rm .github/workflows/temp-machine-qualification-integration.yml
+      - name: Commit integrated checkpoint
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app tests docs
+          git commit -m "Integrate immutable machine qualification evidence"
+          git push
