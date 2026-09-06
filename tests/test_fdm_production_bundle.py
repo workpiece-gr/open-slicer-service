@@ -344,6 +344,13 @@ def test_machine_qualification_receipt_mutation_fails_closed():
         build(fixture)
 
 
+def test_machine_qualification_manifest_summary_must_match_exact_receipt():
+    fixture = retained_fixture()
+    fixture["manifest"]["machine"]["qualification"]["review"]["reviewerId"] = "tampered-reviewer"
+    with pytest.raises(FdmProductionBundleError, match="manifest summary differs"):
+        build(fixture)
+
+
 def test_profile_mutation_fails_closed():
     fixture = retained_fixture()
     fixture["profile_bytes"]["process"] += b" "

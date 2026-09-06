@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .fdm_authority import AUTHORITY_EVIDENCE_CANDIDATE, AUTHORITY_PRODUCTION, evaluate_fdm_authority
+from .fdm_machine_qualification import FdmMachineQualificationError, validate_machine_qualification_receipt
 from .fdm_toolchain_provenance import FDM_TOOLCHAIN_LOCK_SCHEMA, FDM_TOOLCHAIN_MANIFEST_SCHEMA, validate_toolchain_lock
 
 FDM_PRODUCTION_BUNDLE_VERSION = "fdm-production-bundle/1.0.0"
@@ -263,6 +264,29 @@ def build_fdm_production_bundle(
             raise FdmProductionBundleError(f"CP6 is missing exact {kind} profile bytes.")
         _exact_bytes(f"exact {kind} profile", payload, _record(profiles.get(kind)).get("sha256"))
         exact_profiles[kind] = payload
+
+    if authority_state == AUTHORITY_PRODUCTION:
+        qualification = _record(_record(manifest.get("machine")).get("qualification"))
+        request = _record(_record(manifest.get("job")).get("request"))
+        expected_profile_sha = {kind: _record(profiles.get(kind)).get("sha256") for kind in _PROFILE_KINDS}
+        try:
+            normalized_qualification = validate_machine_qualification_receipt(
+                receipt_bytes=machine_qualification_receipt_bytes,
+                evidence_bytes=machine_qualification_evidence_bytes,
+                expected_printer_key=_text(_record(manifest.get("machine")).get("key")),
+                expected_request=request,
+                expected_profile_sha256=expected_profile_sha,
+            )
+        except FdmMachineQualificationError as exc:
+            raise FdmProductionBundleError(str(exc)) from exc
+        expected_qualification = {
+            **normalized_qualification,
+            "evidenceId": normalized_qualification["qualificationId"],
+        }
+        if dict(qualification) != expected_qualification:
+            raise FdmProductionBundleError(
+                "Machine qualification manifest summary differs from the exact retained qualification receipt/evidence bytes."
+            )
 
     toolchain = _record(manifest.get("toolchain"))
     _verify_toolchain_retained_bytes(

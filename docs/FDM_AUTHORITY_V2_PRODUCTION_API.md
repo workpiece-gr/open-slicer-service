@@ -88,8 +88,9 @@ Instead it proves:
 - a bare qualification identifier or missing receipt/evidence bytes cannot grant
   production authority;
 - receipt/request/profile/evidence drift fails closed;
-- CP6 retains and independently re-hashes the exact qualification receipt and
-  physical-evidence artifact for production-authoritative bundles;
+- CP6 independently re-parses/revalidates the exact qualification receipt against
+  the manifest request/profile bindings, verifies its normalized summary, and retains
+  both the receipt and physical-evidence artifact in production-authoritative bundles;
 - the production policy requires published CP5 provenance and full technical
   production authority;
 - pricing cannot grant production/order permission;
