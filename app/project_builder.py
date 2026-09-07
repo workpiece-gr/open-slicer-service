@@ -11,6 +11,8 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
 
+from .fdm_geometry_stability import DEFAULT_MARGIN_MM, POLICY_VERSION, resolve_controlled_orientation
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -193,10 +195,10 @@ def repair_project_plate_layout(
     # Keep enough clearance for RatRig's first-layer skirt/brim. With a
     # 5 mm object margin Orca 2.4.2 generated skirt extrusion at about
     # -2.6 mm, which correctly failed its printable-area verifier.
-    margin_mm: float = 12.0,
+    margin_mm: float = DEFAULT_MARGIN_MM,
     gap_mm: float = 8.0,
 ) -> dict:
-    """Repair Orca 2.4.2 CLI plate placement while preserving its orientation matrices."""
+    """Repair Orca 2.4.2 placement and apply only controlled stability rotations."""
     if not zipfile.is_zipfile(path):
         raise ValueError("Cannot repair layout in a non-3MF archive.")
 
@@ -313,6 +315,8 @@ def repair_project_plate_layout(
         return vertices
 
     placements = []
+    stability_messages: list[str] = []
+    stability_warnings: list[str] = []
     plate_index = 0
     cursor_x = margin_mm
     cursor_y = margin_mm
@@ -320,6 +324,12 @@ def repair_project_plate_layout(
     for item_index, item in enumerate(build_items):
         values = parse_transform(item.attrib.get("transform"))
         object_vertices = vertices_for_build_object(item.attrib.get("objectid"))
+        values, stability = resolve_controlled_orientation(
+            values,
+            object_vertices,
+            envelope_mm,
+            margin_mm=margin_mm,
+        )
         oriented = [transform_point(values, point, include_translation=False) for point in object_vertices]
         mins = [min(point[axis] for point in oriented) for axis in range(3)]
         maxs = [max(point[axis] for point in oriented) for axis in range(3)]
@@ -327,7 +337,12 @@ def repair_project_plate_layout(
         if width <= 0 or depth <= 0 or height <= 0:
             raise ValueError("The project 3MF contains a zero-size oriented object.")
         if width > usable_x + 1e-6 or depth > usable_y + 1e-6 or height > bed_z + 1e-6:
-            raise ValueError("Orca's selected orientation does not fit the selected printer envelope.")
+            raise ValueError("The part does not fit the selected printer after controlled axis and 45-degree diagonal orientation checks.")
+        message = stability.get("message")
+        if isinstance(message, str) and message and message not in stability_messages:
+            stability_messages.append(message)
+        if stability.get("severity") == "warning" and isinstance(message, str) and message and message not in stability_warnings:
+            stability_warnings.append(message)
 
         if cursor_x > margin_mm and cursor_x + width > bed_x - margin_mm + 1e-6:
             cursor_x = margin_mm
@@ -357,6 +372,7 @@ def repair_project_plate_layout(
                     [round(cursor_x + width, 6), round(cursor_y + depth, 6), round(height, 6)],
                 ],
                 "footprint_mm": [round(width, 6), round(depth, 6), round(height, 6)],
+                "stability": stability,
             }
         )
         cursor_x += width + gap_mm
@@ -428,7 +444,20 @@ def repair_project_plate_layout(
     finally:
         temporary.unlink(missing_ok=True)
 
-    return {"repaired": True, "plate_count": len(plates), "plates": plates, "placements": placements}
+    return {
+        "repaired": True,
+        "plate_count": len(plates),
+        "plates": plates,
+        "placements": placements,
+        "warnings": stability_warnings,
+        "notices": [message for message in stability_messages if message not in stability_warnings],
+        "stability": {
+            "policyVersion": POLICY_VERSION,
+            "warningCount": len(stability_warnings),
+            "adjustedInstanceCount": sum(1 for placement in placements if placement["stability"].get("orientationAdjusted")),
+            "diagonalInstanceCount": sum(1 for placement in placements if placement["stability"].get("diagonal45Applied")),
+        },
+    }
 
 
 def build_project_command(
