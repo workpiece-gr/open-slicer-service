@@ -20,6 +20,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Respons
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from .fdm_geometry_stability import source_fits_controlled_ratrig_diagonal
 from .project_builder import (
     build_project_command,
     fits_axis_permutation,
@@ -99,7 +100,7 @@ ENDER_GENERIC_FILAMENTS = {
     "abs": ENDER_GENERIC_ROOT / "filament" / "Creality Generic ABS.json",
     "tpu": ENDER_GENERIC_ROOT / "filament" / "Creality Generic TPU.json",
 }
-ENDER_GENERIC_FILAMENT_COMMON = ENDER_GENERIC_ROOT / "filament" / "fdm_filament_common.json"
+ENDER_GENERIC_FILAMENT_COMMON = ORCA_RESOURCE_ROOT / "Creality" / "filament" / "fdm_filament_common.json"
 ENDER_GENERIC_FILAMENT_BASES = {
     "pla": ENDER_GENERIC_ROOT / "filament" / "fdm_filament_pla.json",
     "petg": ENDER_GENERIC_ROOT / "filament" / "fdm_filament_pet.json",
@@ -394,16 +395,21 @@ def choose_project_printer(requested: str, material: str, dimensions_mm: list[fl
         profile = PROJECT_PRINTERS[requested]
         if material not in profile["materials"]:
             raise HTTPException(status_code=422, detail=f"{material.upper()} is not supported by {requested}.")
-        if not fits_axis_permutation(dimensions_mm, profile["envelope_mm"]):
-            raise HTTPException(status_code=422, detail=f"The STL does not fit the configured {requested} envelope.")
+        fits = (
+            source_fits_controlled_ratrig_diagonal(dimensions_mm, profile["envelope_mm"])
+            if requested == "ratrig_vcore3_300"
+            else fits_axis_permutation(dimensions_mm, profile["envelope_mm"])
+        )
+        if not fits:
+            raise HTTPException(status_code=422, detail=f"The STL does not fit the configured {requested} envelope, including the controlled RatRig diagonal check where applicable.")
         return requested
     ender = PROJECT_PRINTERS["ender3_generic_235"]
     if material in ender["materials"] and fits_axis_permutation(dimensions_mm, ender["envelope_mm"]):
         return "ender3_generic_235"
     ratrig = PROJECT_PRINTERS["ratrig_vcore3_300"]
-    if fits_axis_permutation(dimensions_mm, ratrig["envelope_mm"]):
+    if source_fits_controlled_ratrig_diagonal(dimensions_mm, ratrig["envelope_mm"]):
         return "ratrig_vcore3_300"
-    raise HTTPException(status_code=422, detail="The STL exceeds both configured Workpiece FDM envelopes before Orca orientation.")
+    raise HTTPException(status_code=422, detail="The STL exceeds both configured Workpiece FDM envelopes, including the controlled RatRig 45-degree rod-fit check.")
 
 
 def isolated_orca_env(job: Path) -> dict[str, str]:
@@ -619,7 +625,8 @@ async def build_project(
             auto_orient=True,
             # Do not let the RatRig arranger add arbitrary Z rotations. The
             # 2.4.2 CLI has produced wasteful 45-degree placement for long
-            # rectangular parts here.
+            # rectangular parts here. Controlled +/-45-degree rescue now
+            # happens after export only when geometry/bed fit requires it.
             allow_arrange_rotations=selected_printer != "ratrig_vcore3_300",
         )
         run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
@@ -712,6 +719,10 @@ async def build_project(
             }
 
         profile = PROJECT_PRINTERS[selected_printer]
+        geometry_messages = []
+        if layout_repair:
+            geometry_messages.extend(layout_repair.get("warnings") or [])
+            geometry_messages.extend(layout_repair.get("notices") or [])
         payload = {
             "experimental": True,
             "engine": {
@@ -739,7 +750,7 @@ async def build_project(
                 "strength": strength,
                 "quantity": quantity,
                 "supports": "automatic",
-                "orientation": "orca_auto",
+                "orientation": "orca_auto_plus_controlled_stability_rescue" if selected_printer == "ratrig_vcore3_300" else "orca_auto",
                 "arrangement": "orca_auto",
                 "verification_requested": verify,
                 "response_mode": response_mode,
@@ -768,6 +779,7 @@ async def build_project(
             },
             "verification": verification,
             "warnings": [
+                *geometry_messages,
                 "Experimental CP2b: the editable project 3MF must be manually opened in OrcaSlicer desktop before production use.",
                 "The Ender 3 profile is a temporary Orca-derived generic profile with a Workpiece 235 x 235 x 235 mm envelope override; replace it with measured machine profiles.",
                 "Automatic orientation, arrangement and supports require acceptance testing with representative Workpiece models before manufacturing authority.",
@@ -799,6 +811,7 @@ async def build_project(
                     "layout_repair": {
                         "applied": layout_repair is not None,
                         "plate_count": layout_repair.get("plate_count") if layout_repair else None,
+                        "stability": layout_repair.get("stability") if layout_repair else None,
                     },
                 },
                 "verification": payload["verification"],
