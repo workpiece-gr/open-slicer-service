@@ -1,0 +1,271 @@
+name: FDM v2 CP5 published final service verification
+
+on:
+  pull_request:
+    paths:
+      - "fdm-service.lock.json"
+      - "fdm-service.publication.json"
+      - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
+      - "app/fdm_service_image.py"
+      - "tests/test_fdm_service_image.py"
+      - "tests/test_fdm_authority_production.py"
+      - ".github/workflows/cp5-published-service.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "fdm-service.lock.json"
+      - "fdm-service.publication.json"
+      - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
+      - "app/fdm_service_image.py"
+      - "tests/test_fdm_service_image.py"
+      - "tests/test_fdm_authority_production.py"
+      - ".github/workflows/cp5-published-service.yml"
+  workflow_dispatch:
+
+# Read-only verification of the exact already-published final Authority service.
+# It may authenticate only to pull GHCR packages. It must never push, deploy,
+# configure production, qualify a printer, or change any authority lock.
+permissions:
+  contents: read
+  packages: read
+
+env:
+  FROZEN_SOURCE_SHA: dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f
+
+jobs:
+  verify-published-service:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out current authority receipts
+        uses: actions/checkout@v4
+
+      - name: Validate published service lock and retained publication receipt
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          from app.fdm_service_image import validate_service_lock
+
+          toolchain_bytes = Path('fdm-toolchain.lock.json').read_bytes()
+          lock = validate_service_lock(
+              Path('fdm-service.lock.json').read_bytes(),
+              toolchain_lock_bytes=toolchain_bytes,
+              require_published=True,
+          )
+          publication = json.loads(Path('fdm-service.publication.json').read_text(encoding='utf-8'))
+
+          assert publication['schema'] == 'workpiece-fdm-authority-service-publication-v1'
+          assert publication['approved_frozen_source_commit'] == os.environ['FROZEN_SOURCE_SHA']
+          assert re.fullmatch(r'[0-9a-f]{40}', publication['approved_frozen_source_commit'])
+          assert publication['image'] == lock['image']
+          assert publication['registry_digest'] == lock['digest']
+          assert publication['approved_frozen_source_commit'] == lock['source_commit']
+          assert publication['platform'] == lock['platform']
+          assert publication['toolchain_reference'] == f"{lock['toolchain']['image']}@{lock['toolchain']['digest']}"
+          assert publication['pre_push_bytes_verified'] is True
+          assert publication['push_digest_matches_independent_resolution'] is True
+          assert publication['digest_pinned_pullback_verified'] is True
+          assert publication['pulled_bytes_match_reviewed_candidate'] is True
+          assert publication['pulled_toolchain_bytes_match_published_toolchain_receipt'] is True
+          assert publication['deployment_performed'] is False
+          assert publication['machine_qualification_performed'] is False
+          assert publication['production_enablement_performed'] is False
+          assert publication['human_review_still_required'] is True
+
+          image_ref = f"{lock['image']}@{lock['digest']}"
+          tag_ref = f"{publication['image']}:{publication['tag']}"
+          Path('/tmp/cp5-service-image-ref.txt').write_text(image_ref + '\n', encoding='utf-8')
+          Path('/tmp/cp5-service-tag-ref.txt').write_text(tag_ref + '\n', encoding='utf-8')
+          print(json.dumps({'imageRef': image_ref, 'tagRef': tag_ref, 'sourceCommit': lock['source_commit']}, indent=2))
+          PY
+          echo "SERVICE_IMAGE_REF=$(cat /tmp/cp5-service-image-ref.txt)" >> "$GITHUB_ENV"
+          echo "SERVICE_TAG_REF=$(cat /tmp/cp5-service-tag-ref.txt)" >> "$GITHUB_ENV"
+
+      - name: Check out exact frozen published source separately
+        uses: actions/checkout@v4
+        with:
+          ref: dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f
+          path: frozen-source
+          persist-credentials: false
+
+      - name: Verify frozen source bytes against service publication receipt
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          publication = json.loads(Path('fdm-service.publication.json').read_text(encoding='utf-8'))
+          root = Path('frozen-source')
+
+          def tree_hash(path: Path) -> str:
+              digest = hashlib.sha256()
+              for item in sorted(candidate for candidate in path.rglob('*') if candidate.is_file()):
+                  relative = item.relative_to(path).as_posix().encode('utf-8')
+                  digest.update(len(relative).to_bytes(8, 'big'))
+                  digest.update(relative)
+                  payload = item.read_bytes()
+                  digest.update(len(payload).to_bytes(8, 'big'))
+                  digest.update(payload)
+              return digest.hexdigest()
+
+          assert hashlib.sha256((root / 'Dockerfile.authority').read_bytes()).hexdigest() == publication['service_recipe_sha256']
+          assert hashlib.sha256((root / 'requirements.txt').read_bytes()).hexdigest() == publication['requirements_sha256']
+          assert hashlib.sha256((root / 'fdm-service.lock.json').read_bytes()).hexdigest() == publication['service_lock_sha256_before_publication']
+          assert hashlib.sha256((root / 'fdm-toolchain.lock.json').read_bytes()).hexdigest() == publication['embedded_toolchain_lock_sha256']
+          assert tree_hash(root / 'app') == publication['app_tree_sha256']
+          assert tree_hash(root / 'profiles') == publication['profiles_tree_sha256']
+          PY
+
+      - name: Authenticate to GHCR for read-only pull
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Independently resolve published tag and require locked digest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$SERVICE_TAG_REF" | tee /tmp/cp5-service-tag-inspect.txt
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+
+          publication = json.loads(Path('fdm-service.publication.json').read_text(encoding='utf-8'))
+          text = Path('/tmp/cp5-service-tag-inspect.txt').read_text(encoding='utf-8', errors='replace')
+          match = re.search(r'^Digest:\s+(sha256:[0-9a-f]{64})\s*$', text, flags=re.MULTILINE)
+          assert match, text
+          assert match.group(1) == publication['registry_digest'], (match.group(1), publication['registry_digest'])
+          PY
+
+      - name: Pull exact published final service by immutable digest
+        run: |
+          set -euo pipefail
+          docker pull "$SERVICE_IMAGE_REF"
+          test "$(docker image inspect --format '{{.Architecture}}' "$SERVICE_IMAGE_REF")" = "amd64"
+
+      - name: Verify exact service and inherited toolchain bytes after digest pull
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cp5-published-service/toolchain
+          docker run --rm "$SERVICE_IMAGE_REF" sh -lc 'python -m pip freeze --all | LC_ALL=C sort' \
+            > /tmp/cp5-published-service/pip-freeze.txt
+          docker run --rm -i "$SERVICE_IMAGE_REF" python3 - \
+            > /tmp/cp5-published-service/source-hashes.json <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          def tree_hash(root: Path) -> str:
+              digest = hashlib.sha256()
+              for path in sorted(item for item in root.rglob('*') if item.is_file()):
+                  relative = path.relative_to(root).as_posix().encode('utf-8')
+                  digest.update(len(relative).to_bytes(8, 'big'))
+                  digest.update(relative)
+                  payload = path.read_bytes()
+                  digest.update(len(payload).to_bytes(8, 'big'))
+                  digest.update(payload)
+              return digest.hexdigest()
+
+          print(json.dumps({
+              'appTreeSha256': tree_hash(Path('/app/app')),
+              'profilesTreeSha256': tree_hash(Path('/app/profiles')),
+              'requirementsSha256': hashlib.sha256(Path('/app/requirements.txt').read_bytes()).hexdigest(),
+              'embeddedToolchainLockSha256': hashlib.sha256(Path('/app/fdm-toolchain.lock.json').read_bytes()).hexdigest(),
+          }, sort_keys=True, indent=2))
+          PY
+
+          cid=$(docker create "$SERVICE_IMAGE_REF")
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/opt/workpiece-toolchain/manifest.json" /tmp/cp5-published-service/toolchain/manifest.json
+          docker cp "$cid:/opt/workpiece-toolchain/packages.txt" /tmp/cp5-published-service/toolchain/packages.txt
+          docker cp "$cid:/opt/orca/squashfs-root/AppRun" /tmp/cp5-published-service/toolchain/orca-AppRun
+          docker rm "$cid"
+          trap - EXIT
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          publication = json.loads(Path('fdm-service.publication.json').read_text(encoding='utf-8'))
+          source_hashes = json.loads(Path('/tmp/cp5-published-service/source-hashes.json').read_text())
+          assert source_hashes['appTreeSha256'] == publication['app_tree_sha256']
+          assert source_hashes['profilesTreeSha256'] == publication['profiles_tree_sha256']
+          assert source_hashes['requirementsSha256'] == publication['requirements_sha256']
+          assert source_hashes['embeddedToolchainLockSha256'] == publication['embedded_toolchain_lock_sha256']
+          assert hashlib.sha256(Path('/tmp/cp5-published-service/pip-freeze.txt').read_bytes()).hexdigest() == publication['pip_freeze_sha256']
+
+          toolchain_publication = json.loads(Path('fdm-toolchain.publication.json').read_text(encoding='utf-8'))
+          checks = {
+              '/tmp/cp5-published-service/toolchain/manifest.json': toolchain_publication['toolchain_manifest_sha256'],
+              '/tmp/cp5-published-service/toolchain/packages.txt': toolchain_publication['package_inventory_sha256'],
+              '/tmp/cp5-published-service/toolchain/orca-AppRun': toolchain_publication['orca_runtime_sha256'],
+          }
+          for path, expected in checks.items():
+              actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              assert actual == expected, (path, actual, expected)
+
+          evidence = {
+              'contractVersion': 'fdm-authority-service-published-verification/1.0.0',
+              'authorityState': 'published_service_verified',
+              'authorityCriticalComplete': False,
+              'imageReference': publication['image'] + '@' + publication['registry_digest'],
+              'sourceCommit': publication['approved_frozen_source_commit'],
+              'registryDigest': publication['registry_digest'],
+              'appTreeSha256': source_hashes['appTreeSha256'],
+              'profilesTreeSha256': source_hashes['profilesTreeSha256'],
+              'requirementsSha256': source_hashes['requirementsSha256'],
+              'pipFreezeSha256': publication['pip_freeze_sha256'],
+              'toolchainReference': publication['toolchain_reference'],
+              'deploymentPerformed': False,
+              'machineQualificationPerformed': False,
+              'productionEnablementPerformed': False,
+              'humanReviewStillRequired': True,
+          }
+          Path('/tmp/cp5-published-service/verification.json').write_text(
+              json.dumps(evidence, sort_keys=True, indent=2) + '\n', encoding='utf-8'
+          )
+          print(json.dumps(evidence, indent=2))
+          PY
+
+      - name: Prove verifier has no registry-write path
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/cp5-published-service.yml').read_text(encoding='utf-8').lower()
+          required = ['packages: read', 'docker pull']
+          forbidden = ['packages:' + ' write', 'docker ' + 'push', '--' + 'push']
+          for token in required:
+              assert token in workflow, f'missing read-only verification token: {token}'
+          for token in forbidden:
+              assert token not in workflow, f'publication-capable token present: {token}'
+          PY
+
+      - name: Upload published service verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp5-published-final-service-verification
+          path: |
+            /tmp/cp5-published-service/verification.json
+            /tmp/cp5-published-service/source-hashes.json
+            /tmp/cp5-published-service/pip-freeze.txt
+            /tmp/cp5-published-service/toolchain/manifest.json
+            /tmp/cp5-published-service/toolchain/packages.txt
+            /tmp/cp5-service-tag-inspect.txt
+          if-no-files-found: error
+          retention-days: 30
