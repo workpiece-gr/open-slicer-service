@@ -131,6 +131,14 @@ jobs:
               assert actual == expected, (path, actual, expected)
           PY
 
+      - name: Remove transient Python bytecode from service build context
+        run: |
+          set -euo pipefail
+          find app profiles -type d -name __pycache__ -prune -exec rm -rf {} +
+          find app profiles -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+          test -z "$(find app profiles -type d -name __pycache__ -print -quit)"
+          test -z "$(find app profiles -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)"
+
       - name: Build final service-image candidate on exact published toolchain
         run: |
           set -euo pipefail
