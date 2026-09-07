@@ -33,6 +33,13 @@ def _paths(tmp_path: Path) -> tuple[Path, Path, dict[str, bytes]]:
     return source, project, profiles
 
 
+def _unpublished_lock_bytes() -> bytes:
+    value = json.loads(Path("fdm-toolchain.lock.json").read_text(encoding="utf-8"))
+    value["status"] = "unpublished"
+    value["digest"] = None
+    return (json.dumps(value, indent=2) + "\n").encode()
+
+
 def _kwargs(tmp_path: Path) -> dict:
     source, project, profiles = _paths(tmp_path)
     generation_receipt = _receipt(profiles)
@@ -91,8 +98,9 @@ def test_production_authority_rejects_free_form_id_that_disagrees_with_receipt(t
         production.build_fdm_authority_production(**values)
 
 
-def test_current_unpublished_lock_blocks_production_before_pipeline(monkeypatch, tmp_path: Path):
+def test_synthetic_unpublished_lock_blocks_production_before_pipeline(monkeypatch, tmp_path: Path):
     values = _kwargs(tmp_path)
+    values["toolchain_lock_bytes"] = _unpublished_lock_bytes()
 
     def should_not_run(**_kwargs):
         raise AssertionError("shared pipeline must not run when CP5 publication is absent")
@@ -182,7 +190,7 @@ def test_production_api_uses_independent_token(monkeypatch):
     assert caught.value.status_code == 401
 
 
-def test_production_health_requires_qualification_receipt_and_evidence_files(monkeypatch, tmp_path: Path):
+def test_production_health_reports_published_lock_but_still_requires_qualification_files(monkeypatch, tmp_path: Path):
     receipt = tmp_path / "qualification.json"
     evidence = tmp_path / "qualification-evidence.bin"
     receipt.write_bytes(b"receipt")
@@ -191,7 +199,7 @@ def test_production_health_requires_qualification_receipt_and_evidence_files(mon
     monkeypatch.setattr(production_api, "FDM_MACHINE_QUALIFICATION_RECEIPT", receipt)
     monkeypatch.setattr(production_api, "FDM_MACHINE_QUALIFICATION_EVIDENCE", evidence)
     status = production_api.production_config_status()
-    assert status["published_toolchain_lock"] is False
+    assert status["published_toolchain_lock"] is True
     assert status["machine_qualification_receipt"] is True
     assert status["machine_qualification_evidence"] is True
 

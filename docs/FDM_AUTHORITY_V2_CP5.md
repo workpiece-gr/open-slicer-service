@@ -1,6 +1,25 @@
 # FDM Authority v2 — CP5 immutable toolchain provenance
 
-CP5 adds an immutable manufacturing-toolchain path alongside the current FDM service image. It does not replace or deploy the existing production Dockerfile.
+CP5 provides an immutable manufacturing-toolchain authority boundary alongside the current FDM service image. It does not replace or deploy the existing production Dockerfile.
+
+## Current state
+
+The reviewed manufacturing toolchain has now been explicitly published and independently verified. The committed lock is:
+
+```text
+status: published
+digest: sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739
+```
+
+The immutable toolchain reference is therefore:
+
+```text
+ghcr.io/workpiece-gr/fdm-slicer-toolchain@sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739
+```
+
+`fdm-toolchain.publication.json` retains the reviewed publication facts from the approved publication run: frozen source commit, repository/tag/platform, exact registry digest, reviewed recipe/manifest/package/runtime SHA-256 values, private package visibility, successful digest-pinned pull-back, and explicit statements that no service image, deployment, physical qualification, or production enablement was performed.
+
+Publication of this toolchain does **not** by itself grant FDM production authority.
 
 ## Authority boundary
 
@@ -11,23 +30,27 @@ FDM production authority needs two separate content-addressed image identities:
 
 A mutable tag is not sufficient for either authority boundary. Production receipts must use `image@sha256:<digest>` references.
 
+The manufacturing-toolchain boundary is now published and digest-pinned. The final service execution image is still a separate future publication/review boundary.
+
 ## Parallel build path
 
 The existing `Dockerfile` remains unchanged and continues to represent the current working production path.
 
-CP5 adds:
+CP5 uses:
 
 - `Dockerfile.toolchain` — rarely rebuilt Orca/system dependency image;
 - `Dockerfile.authority` — parallel service image that consumes a supplied `TOOLCHAIN_IMAGE`;
-- `fdm-toolchain.lock.json` — reviewed upstream/toolchain lock;
+- `fdm-toolchain.lock.json` — reviewed immutable toolchain lock;
+- `fdm-toolchain.publication.json` — retained publication verification facts;
 - `app/fdm_toolchain_provenance.py` — fail-closed provenance validation;
-- a candidate-only CI workflow.
+- `.github/workflows/cp5-immutable-toolchain.yml` — candidate-only local integration evidence;
+- `.github/workflows/cp5-published-toolchain.yml` — read-only verification of the exact published digest.
 
 No CP5 file changes Railway/deployment configuration or makes the live service consume the authority image.
 
 ## Upstream pins
 
-The committed lock fixes the CP5 candidate to:
+The committed lock fixes the published CP5 toolchain to:
 
 - platform: `linux/amd64`;
 - Ubuntu Noble dated image `noble-20260810` by full amd64 manifest digest;
@@ -47,7 +70,7 @@ The image records `/opt/workpiece-toolchain/manifest.json` containing:
 - exact runtime `AppRun` path and SHA-256;
 - SHA-256 of the complete installed dpkg package/version inventory.
 
-The package inventory is evidence of the exact built candidate. It is not treated as a substitute for the final image digest.
+The published verification workflow pulls the exact locked image **by digest**, re-extracts those retained bytes, validates them against the lock, and requires the manifest/package/runtime hashes to match `fdm-toolchain.publication.json`.
 
 ## Why the final service digest is separate
 
@@ -58,7 +81,7 @@ Even with an immutable toolchain image, the final service layer adds:
 - Python packages and their resolved transitive environment;
 - runtime configuration baked into the image.
 
-Therefore CP5 does not claim that pinning only Orca or only the toolchain base is sufficient. Technical production authority requires the exact final service image reference by digest as well.
+Therefore pinning the toolchain alone is not sufficient. Technical production authority also requires the exact final service image reference by digest.
 
 ## Provenance receipt
 
@@ -78,48 +101,46 @@ The validator checks the manifest against the committed lock and independently h
 
 ## Candidate vs production
 
-The committed lock intentionally starts as:
+A **published lock does not make local candidate CI authoritative**.
+
+Candidate workflows continue to build local content-addressed images and call:
 
 ```text
-status: unpublished
-digest: null
+build_toolchain_provenance(..., require_published=False)
 ```
 
-This is a safety property, not missing evidence hidden by CI.
-
-Candidate CI may build local content-addressed images and record their Docker image IDs, but `build_toolchain_provenance(..., require_published=False)` must return:
+Those receipts must still report:
 
 - `authorityState: evidence_candidate`;
-- `authorityCriticalComplete: false`.
+- `authorityCriticalComplete: false`;
+- `lockStatus: published`.
 
-Production provenance is only possible after a separate, explicitly approved publication/review step updates the committed lock to:
+The lock status truthfully records that the reviewed manufacturing toolchain exists, while the candidate receipt remains non-authoritative because it is bound to local candidate image IDs rather than the reviewed published toolchain plus a reviewed final service image.
 
-- `status: published`;
-- exact `sha256:<digest>` of the reviewed toolchain image.
+Production provenance requires:
 
-The final service runtime must independently be supplied as a digest-pinned execution reference.
+- the committed published toolchain digest;
+- the exact published toolchain bytes;
+- an independently published/reviewed final service execution image by digest;
+- the remaining CP1–CP7 evidence and machine qualification gates.
 
-CP5 does not implement or execute that publication step. The CI workflow has read-only repository permission, no package-write permission, no registry login, and no push command.
+## Publication handoff history
 
-## Pre-publication review handoff
+Before publication, `app/fdm_toolchain_publication_review.py` and the former `cp5-publication-review.yml` workflow created deterministic non-publishing review evidence. The generator intentionally rejects a published lock so historical pre-publication evidence cannot be recreated or misrepresented after the transition.
 
-Before any approved registry publication, `.github/workflows/cp5-publication-review.yml` can build the exact candidate locally and emit a deterministic `fdm-toolchain-publication-review/1.0.0` packet. The packet binds the reviewed source commit, lock bytes, both CP5 Docker recipes, exact extracted manifest/package/runtime evidence, local candidate image IDs, and the intended repository/tag/platform.
+The automatic pre-publication workflow is retired in the published state. Its contract remains unit-tested with synthetic unpublished locks, and the actual approved publication evidence is retained in `fdm-toolchain.publication.json`.
 
-That packet is deliberately non-authoritative: it records that publication was not performed, no registry digest exists, production authority is not eligible, production enablement was not performed, and explicit publication approval is still required. Local Docker image IDs are retained only as candidate evidence and are explicitly not treated as registry manifest digests.
-
-See [`FDM_AUTHORITY_V2_CP5_PUBLICATION_REVIEW.md`](FDM_AUTHORITY_V2_CP5_PUBLICATION_REVIEW.md) for the review and later operator handoff sequence. The read-only review workflow does not authenticate to GHCR, push images, update the lock, deploy anything, or create physical-machine qualification evidence.
-
-The approval-gated publication and lock-transition procedure is documented separately in [`FDM_AUTHORITY_V2_CP5_PUBLICATION.md`](FDM_AUTHORITY_V2_CP5_PUBLICATION.md). That runbook does not authorize publication; it preserves the current `unpublished` safety boundary until an exact candidate is explicitly approved.
+See [`FDM_AUTHORITY_V2_CP5_PUBLICATION_REVIEW.md`](FDM_AUTHORITY_V2_CP5_PUBLICATION_REVIEW.md) for the historical handoff and [`FDM_AUTHORITY_V2_CP5_PUBLICATION.md`](FDM_AUTHORITY_V2_CP5_PUBLICATION.md) for the approval-gated transition record and remaining phases.
 
 ## Candidate integration gate
 
-The CP5 workflow:
+The CP5 candidate workflow still:
 
 1. builds `Dockerfile.toolchain` locally;
 2. extracts the exact toolchain manifest, package inventory, and Orca `AppRun` bytes;
-3. validates them against `fdm-toolchain.lock.json`;
+3. validates them against the published `fdm-toolchain.lock.json`;
 4. records the local content-addressed toolchain image ID;
-5. builds `Dockerfile.authority` on that candidate toolchain;
+5. builds `Dockerfile.authority` on that local candidate toolchain;
 6. records the local content-addressed final service image ID;
 7. creates candidate-only CP5 provenance and proves it cannot self-authorize;
 8. starts the authority service candidate;
@@ -129,9 +150,24 @@ The CP5 workflow:
 12. re-hashes the retained G-code on the host;
 13. uploads candidate evidence only.
 
+## Published verification gate
+
+The published verification workflow:
+
+1. validates the committed lock with `require_published=True`;
+2. validates the retained publication receipt against the lock and reviewed `Dockerfile.toolchain` hash;
+3. authenticates to GHCR with `packages: read` only;
+4. pulls `ghcr.io/workpiece-gr/fdm-slicer-toolchain@sha256:3cee4cdf...` by digest;
+5. extracts the exact manifest, package inventory, and Orca runtime bytes;
+6. re-validates those bytes against the lock;
+7. requires their SHA-256 values to match the retained publication record;
+8. uploads verification evidence only.
+
+The workflow contains no package-write permission and no registry push command.
+
 ## Relationship to CP1–CP4
 
-CP5 does not weaken earlier gates. Once wired into the v2 authority evaluator, the technical chain requires all of:
+CP5 does not weaken earlier gates. The technical chain still requires all of:
 
 - immutable source/config/project evidence;
 - exact retained per-plate G-code;
@@ -141,17 +177,16 @@ CP5 does not weaken earlier gates. Once wired into the v2 authority evaluator, t
 
 The CP5 receipt itself cannot replace any CP2–CP4 evidence.
 
-## Non-goals
+## Remaining non-goals / gates
 
-CP5 does not:
+This published-lock checkpoint does not:
 
-- publish a Docker/GHCR image;
-- update a registry digest automatically;
+- publish the final service execution image;
 - change the live `Dockerfile`;
-- deploy the authority image;
+- deploy the authority service;
 - change `/v1/project` or website behavior;
 - change any printer/material profile;
+- qualify the RatRig physically;
 - qualify the generic Ender route;
-- create the deterministic production bundle (CP6);
-- make pricing server-authoritative (CP7);
+- enable website production mode or checkout;
 - remove the human workshop review gate.

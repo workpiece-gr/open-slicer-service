@@ -1,6 +1,6 @@
 # FDM Authority v2 CP6 — deterministic production bundle
 
-Status: implementation checkpoint. CP6 does not publish the CP5 runtime, qualify a printer, change `/v1/project`, alter website behavior, make pricing authoritative, remove human review, or deploy a production path.
+Status: implementation checkpoint. CP6 does not republish or alter the CP5 toolchain, publish the final Authority service image, qualify a printer, change `/v1/project`, alter website behavior, make pricing authoritative, remove human review, or deploy a production path.
 
 ## Purpose
 
@@ -29,16 +29,23 @@ The bundle contract is `fdm-production-bundle/1.0.0` with layout `workpiece-fdm-
 
 Before writing a ZIP, CP6 independently re-hashes every retained byte payload against its manifest/CP5 receipt. Missing bytes, drift, unexpected plate G-code, filename path traversal, malformed retained toolchain metadata, or any hash mismatch fail closed.
 
-The exact Orca runtime binary is not duplicated into every job bundle. CP5 already binds that binary by SHA-256 to a digest-pinned execution image. CP6 retains the lock, toolchain manifest, package inventory, and immutable CP5 receipt/reference required to identify that runtime.
+The exact Orca runtime binary is not duplicated into every job bundle. CP5 binds that binary by SHA-256 to the reviewed immutable toolchain. CP6 retains the lock, toolchain manifest, package inventory, and CP5 receipt/reference required to identify the relevant runtime evidence.
 
 ## Production versus candidate bundle
 
 The default builder mode requires `evaluate_fdm_authority()` to report `production_authoritative` before packaging.
 
-Current repository CP5 state is intentionally **unpublished**, so the real CP6 CI path uses the explicit candidate mode. Candidate packaging is allowed only when the unresolved technical-authority findings are limited to the separately controlled gates:
+The repository now has a genuinely published, digest-pinned CP5 manufacturing-toolchain lock. The real CP6 CI path nevertheless remains an explicit **candidate** proof: it locally rebuilds the toolchain/service candidates and calls `build_toolchain_provenance(..., require_published=False)` with local content-addressed image IDs. Therefore its receipt truthfully reports `lockStatus: published` while remaining:
 
-- `missing_immutable_toolchain` (the reviewed CP5 image has not been published/digest-locked for production);
-- `machine_not_production_ready` (physical machine/profile qualification has not been supplied to that CI job).
+- `authorityState: evidence_candidate`;
+- `authorityCriticalComplete: false`.
+
+Candidate packaging is allowed only when the unresolved technical-authority findings are limited to the separately controlled gates:
+
+- `missing_immutable_toolchain` — the candidate receipt is intentionally bound to local candidate image IDs, not the reviewed published toolchain together with a separately reviewed final service execution image;
+- `machine_not_production_ready` — physical machine/profile qualification has not been supplied to that CI job.
+
+The first issue no longer means “the repository lock is unpublished.” It means the particular candidate evidence package has not satisfied the complete immutable production execution boundary.
 
 Any unrelated authority failure—G-code validation, profile/source/project drift, instance/plate mismatch, incomplete statistics, human-review gate removal, or other contract failure—still blocks candidate packaging.
 
@@ -87,33 +94,35 @@ The production manifest's bundle block maps stable plate ids to those normalized
 
 ## Real integration proof
 
-The CP6 workflow uses the parallel CP5 authority candidate rather than the live service. It:
+The CP6 workflow uses a local parallel CP5 Authority candidate rather than the live service. It:
 
-1. builds the exact CP5 toolchain candidate;
-2. records candidate digest-bound CP5 provenance without publishing it;
+1. builds the exact CP5 toolchain candidate from the same pinned recipe while the committed lock is published;
+2. records local candidate digest-bound CP5 provenance with `require_published=False`, preserving `evidence_candidate` despite `lockStatus: published`;
 3. generates a real five-instance, multi-plate RatRig PLA production 3MF through the existing endpoint with `verify=false`;
 4. reopens only that exact retained 3MF through CP2;
 5. independently validates every exact plate G-code through CP3;
 6. proves stable per-instance/per-plate evidence through CP4;
-7. builds a truthful FDM v2 manifest with `productionReady: false` and the unpublished CP5 receipt;
+7. builds a truthful FDM v2 manifest with `productionReady: false` and candidate-only CP5 provenance;
 8. asserts the only authority issues are the two explicit external readiness gates above;
 9. builds the CP6 ZIP twice in the container and requires identical bytes/SHA-256;
 10. copies the retained artifacts to the host, rebuilds the bundle independently, and requires byte-for-byte equality;
 11. re-hashes every indexed ZIP member on the host.
 
-This proves deterministic packaging of real manufacturing evidence without claiming physical qualification or published runtime readiness.
+This proves deterministic packaging of real manufacturing evidence without claiming physical qualification, final-service publication, deployment, or production enablement.
 
 ## CP6 non-goals
 
 CP6 does **not**:
 
-- publish the CP5 toolchain image or edit `fdm-toolchain.lock.json` to a reviewed production digest;
+- republish or mutate the reviewed CP5 toolchain digest;
+- publish the final `Dockerfile.authority` service execution image;
 - deploy `Dockerfile.authority`;
 - change the current production website/server request path;
 - change printer selection or profiles;
 - promote the temporary generic Ender route;
 - make price server-authoritative (CP7);
+- create or infer RatRig physical qualification evidence;
 - remove or bypass human workshop review;
 - send G-code to a printer.
 
-After CP6, the planned software checkpoint is CP7 server-authoritative pricing derived from the same exact manufacturing evidence. Operational publication/physical qualification remain separate gates and must not be inferred from green software CI.
+The software checkpoint remains evidence-oriented. The already-published toolchain is only one authority boundary; final-service publication, genuine RatRig physical qualification, deployment/configuration, website production mode, and controlled physical acceptance remain separate deliberate gates.

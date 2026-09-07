@@ -1,16 +1,30 @@
 # FDM Authority v2 — CP5 publication and digest-transition runbook
 
-This runbook prepares the **manual, explicitly approved** transition from the current CP5 candidate state to a reviewed published toolchain digest. It does not authorize a registry write, deployment, website production-mode change, printer qualification, or production fulfilment.
+This runbook records the approval-gated transition from the CP5 candidate state to a reviewed published toolchain digest and defines the remaining service-image/production steps. Publication, deployment, website production mode, printer qualification, and production fulfilment remain separate actions.
 
-The current safe state is intentionally:
+## Current verified state
+
+Phases A and B have been completed for the reviewed toolchain candidate, and this lock-transition checkpoint implements Phase C.
+
+The reviewed publication is:
 
 ```text
-fdm-toolchain.lock.json
-status: unpublished
-digest: null
+frozen source: 31ca0c983c7bf8b8a92ec44b7fa57b54ddbc9318
+image: ghcr.io/workpiece-gr/fdm-slicer-toolchain
+tag: orca-2.4.2-noble-20260810-amd64
+platform: linux/amd64
+digest: sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739
+visibility: private
 ```
 
-Until Chris explicitly approves publication, stop before every registry write described below.
+The approved publication run independently resolved the registry digest, pulled the image back by digest, and reproduced the reviewed toolchain-manifest, package-inventory, and Orca-runtime bytes. `fdm-toolchain.publication.json` retains those facts.
+
+The committed lock is therefore now intended to be:
+
+```text
+status: published
+digest: sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739
+```
 
 ## Safety invariants
 
@@ -21,88 +35,93 @@ The publication transition must preserve all of these invariants:
 - no mutable tag is accepted as manufacturing authority;
 - the exact published toolchain image is identified by `image@sha256:<digest>`;
 - the final service execution image is separately identified by its own digest-pinned reference;
-- publication does not deploy the authority service;
-- publication does not configure website `production` mode;
-- publication does not create or imply RatRig physical qualification evidence;
+- toolchain publication does not deploy the authority service;
+- toolchain publication does not configure website `production` mode;
+- toolchain publication does not create or imply RatRig physical qualification evidence;
 - Generic Ender remains unqualified;
 - human workshop review remains mandatory.
 
-## Phase A — pre-publication review (safe now)
+## Phase A — pre-publication review — completed
 
-1. **Freeze the exact source revision.** Record the reviewed `open-slicer-service` commit SHA. Do not publish from a moving branch or a dirty working tree.
-2. **Confirm the committed lock is still unpublished.** `status` must be `unpublished` and `digest` must be `null` before approval.
-3. **Confirm the candidate pins.** Review the exact base-image digest, Orca version, release asset id, AppImage filename, AppImage SHA-256, platform, `Dockerfile.toolchain`, and `Dockerfile.authority` inputs in `fdm-toolchain.lock.json`.
-4. **Require a green CP5 candidate run on the exact reviewed commit.** Retain the candidate evidence artifact from `.github/workflows/cp5-immutable-toolchain.yml`.
-5. **Review the candidate evidence.** At minimum confirm the toolchain manifest, package-inventory hash, exact Orca `AppRun` hash, local toolchain image id, local authority image id, candidate provenance receipt, CP2→CP3 chain report, and retained G-code hashes.
-6. **Confirm the candidate remains non-authoritative.** Candidate provenance must still report `authorityState: evidence_candidate` and `authorityCriticalComplete: false`.
+The approved review froze source commit `31ca0c983c7bf8b8a92ec44b7fa57b54ddbc9318`, confirmed the then-unpublished lock and exact upstream/build pins, required green CP5 candidate evidence, and reviewed the retained manifest/package/runtime/local-image/CP2→CP3 evidence.
 
-A local Docker image id is useful candidate evidence, but it is **not** the registry manifest digest that may later be committed to the lock.
+Candidate provenance remained:
 
-## Approval boundary — mandatory stop
+- `authorityState: evidence_candidate`;
+- `authorityCriticalComplete: false`.
 
-**STOP. Do not log in to GHCR, push an image, create/update a package, or change the lock to `published` without explicit approval from Chris for the exact reviewed candidate.**
+Local Docker image IDs were treated only as candidate evidence and never as registry digests.
 
-Approval should identify at least:
+## Approval boundary — satisfied for the exact reviewed toolchain
 
-- exact source commit SHA;
-- target image repository from the lock;
-- review tag from the lock;
-- platform (`linux/amd64`);
-- the candidate evidence/run being approved.
+Chris explicitly approved publication after the safety check for the exact frozen candidate. That approval applied only to the toolchain image above. It did not approve the final service image, deployment, physical qualification, website production mode, or any other operational change.
 
-If any of those inputs change after approval, return to Phase A and obtain approval for the new candidate.
+Any future change to the reviewed inputs requires a new review and explicit approval.
 
-## Phase B — approved toolchain publication
+## Phase B — approved toolchain publication — completed
 
-Only after the approval boundary has been satisfied:
+The approved publication operation:
 
-1. Build the exact reviewed `Dockerfile.toolchain` from the frozen commit for `linux/amd64`.
-2. Re-run the same manifest/runtime validation used by CP5 candidate CI before the push.
-3. Tag that exact reviewed local image with the lock's GHCR repository and review tag.
-4. Authenticate to GHCR with credentials that have only the package permissions required for the manual publication operation.
-5. Push the reviewed toolchain image once.
-6. Record the digest reported for the pushed registry manifest.
-7. Independently resolve the tag from GHCR and confirm it resolves to the same `sha256:<64 hex>` digest.
-8. Pull the image back **by digest**, not by tag, and re-extract `/opt/workpiece-toolchain/manifest.json`, `/opt/workpiece-toolchain/packages.txt`, and the exact Orca `AppRun` bytes.
-9. Re-run `validate_toolchain_manifest(...)` against the committed lock inputs and the bytes extracted from the digest-pinned published image.
+1. built the exact reviewed `Dockerfile.toolchain` for `linux/amd64`;
+2. revalidated the reviewed manifest/package/runtime bytes before the registry write;
+3. pushed only the reviewed toolchain tag;
+4. independently resolved the resulting registry digest;
+5. pulled the image back **by digest**;
+6. re-extracted the exact toolchain manifest, package inventory, and Orca runtime;
+7. required byte/hash equality with the reviewed candidate evidence;
+8. confirmed the created GHCR package was private;
+9. recorded that no service image, deployment, physical qualification, or production enablement occurred;
+10. removed the one-time package-write workflow after the successful operation.
 
-If the independently resolved digest differs, if the digest-pinned pull cannot be verified, or if any retained manifest/runtime byte differs from the reviewed candidate evidence, **do not update the lock**. Treat the publication as unusable authority evidence and investigate the mismatch.
+The verified immutable toolchain reference is:
 
-## Phase C — lock transition PR
+```text
+ghcr.io/workpiece-gr/fdm-slicer-toolchain@sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739
+```
 
-After the exact published digest has been independently verified, open a focused PR that changes the lock to:
+## Phase C — lock transition — this checkpoint
+
+The focused transition changes only the lock state/digest among the manufacturing pins:
 
 ```text
 status: published
-digest: sha256:<exact reviewed registry digest>
+digest: sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739
 ```
 
-Do not change the image repository, review tag, upstream Orca pins, base-image digest, build recipe, service recipe, or platform in the same lock-transition PR unless the entire candidate is deliberately re-reviewed and re-published.
+It does **not** change:
 
-### Important current-CI transition
+- image repository;
+- review tag;
+- upstream Orca pins;
+- base-image digest;
+- `Dockerfile.toolchain` manufacturing recipe;
+- `Dockerfile.authority` service recipe;
+- platform;
+- profiles.
 
-The current candidate workflow and unit suite intentionally hard-assert that the committed lock is `unpublished`. That is a useful pre-publication safety guard today, but an approved lock-transition PR must deliberately replace those state-specific assertions.
+### CI transition
 
-The replacement must remain fail-closed:
+The former pre-publication assertions are deliberately replaced rather than weakened:
 
-- a published lock must require a syntactically valid `sha256:` digest;
-- CI must never infer or write the digest itself;
-- candidate/local image ids must never substitute for the registry digest;
-- candidate provenance must remain non-authoritative even when testing code against a published lock;
-- published-image verification should be read-only and operate on the exact digest-pinned image;
-- no workflow used for verification should receive `packages: write` or contain a registry push command.
+- the committed lock must validate as `published` with a real `sha256:` digest;
+- the exact digest must match the retained actual publication record;
+- candidate/local image IDs never substitute for the registry digest;
+- candidate provenance remains `evidence_candidate` / `authorityCriticalComplete: false` even when the committed lock is published;
+- the old automatic pre-publication review workflow is retired because its generator correctly rejects a published lock;
+- a new published-image verifier uses only `contents: read` and `packages: read`, pulls the exact digest-pinned image, and re-hashes its retained bytes against `fdm-toolchain.publication.json`;
+- no published-state verification workflow receives `packages: write` or contains a registry push command.
 
-Do not weaken or remove the pre-publication guard until the approved publication has actually occurred and the exact digest is available for review.
+Synthetic unpublished-lock tests remain to prove that production authority still fails closed if a future malformed/unpublished lock is supplied.
 
-## Phase D — exact final service execution image
+## Phase D — exact final service execution image — not yet performed
 
 The published manufacturing toolchain digest alone is not sufficient for production authority.
 
-Build the parallel service image from `Dockerfile.authority` using the **digest-pinned** toolchain reference as `TOOLCHAIN_IMAGE`. The resulting final service execution image must then be separately published/reviewed and supplied to Authority v2 as its own `image@sha256:<digest>` reference.
+The parallel service image must be built from `Dockerfile.authority` using the **digest-pinned** toolchain reference as `TOOLCHAIN_IMAGE`. The resulting final service execution image must then be separately published/reviewed and supplied to Authority v2 as its own `image@sha256:<digest>` reference.
 
-That service-image publication is another registry write and also requires explicit approval. Building or publishing it does not deploy it.
+That service-image publication is another registry write and requires a separate explicit approval. Building or publishing it does not deploy it.
 
-## Phase E — authority proof before deployment
+## Phase E — authority proof before deployment — not yet performed
 
 Before any production deployment/configuration, require a controlled proof that the exact retained bytes can construct CP5 provenance with:
 
@@ -118,8 +137,9 @@ This is only the CP5 technical provenance gate. Production Authority v2 still al
 
 ## Explicitly separate actions
 
-The following remain separate, deliberate operations and must not be bundled into the CP5 publication transition:
+The following remain separate, deliberate operations and must not be bundled into this lock transition:
 
+- final service-image publication;
 - production-authority service deployment;
 - production credentials or provider configuration;
 - website `production` mode enablement;
@@ -129,4 +149,4 @@ The following remain separate, deliberate operations and must not be bundled int
 - approval/checkout enablement changes;
 - removal of mandatory human workshop review.
 
-Publication is provenance preparation, not deployment and not manufacturing qualification.
+The published toolchain is now immutable provenance infrastructure. It is not deployment and not manufacturing qualification.

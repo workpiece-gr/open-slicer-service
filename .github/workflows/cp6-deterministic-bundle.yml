@@ -14,6 +14,7 @@ on:
       - "Dockerfile.toolchain"
       - "Dockerfile.authority"
       - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
       - "profiles/**"
       - ".github/workflows/cp6-deterministic-bundle.yml"
   push:
@@ -26,6 +27,7 @@ on:
       - "Dockerfile.toolchain"
       - "Dockerfile.authority"
       - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
       - "profiles/**"
       - ".github/workflows/cp6-deterministic-bundle.yml"
 
@@ -65,7 +67,7 @@ jobs:
             .
           docker image inspect --format '{{.Id}}' workpiece-fdm-authority:cp6 > /tmp/cp6-evidence/runtime-image-id.txt
 
-      - name: Build exact unpublished CP5 provenance receipt
+      - name: Build candidate CP5 provenance receipt from published lock
         env:
           SOURCE_COMMIT_SHA: ${{ github.sha }}
         run: |
@@ -92,7 +94,7 @@ jobs:
           )
           assert receipt["authorityState"] == "evidence_candidate"
           assert receipt["authorityCriticalComplete"] is False
-          assert receipt["lockStatus"] == "unpublished"
+          assert receipt["lockStatus"] == "published"
           Path("/tmp/cp6-evidence/toolchain-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
           PY
 

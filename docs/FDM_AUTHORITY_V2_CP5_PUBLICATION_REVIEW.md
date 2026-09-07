@@ -1,17 +1,34 @@
 # FDM Authority v2 — CP5 publication review handoff
 
-This checkpoint prepares the immutable CP5 toolchain for a later, explicitly approved registry publication without publishing, deploying, or granting production authority.
+This document records the pre-publication review handoff that was used before the CP5 manufacturing toolchain was explicitly published. It remains relevant as the historical safety contract for future re-publication, but the repository is no longer in the unpublished state described by the original checkpoint.
 
-The canonical CP5 lock remains `status: unpublished` with `digest: null`. That state must not be changed by candidate CI or by this review workflow.
+## Completed transition
 
-## Why this handoff exists
+The reviewed candidate was published after explicit approval and independently verified by digest-pinned pull-back. The committed toolchain lock now points to:
 
-The existing CP5 candidate workflow proves that the pinned Ubuntu/Orca toolchain and parallel authority service can build and execute the FDM authority smoke chain. Its local Docker image IDs are useful candidate evidence, but they are **not registry manifest digests** and cannot be copied into `fdm-toolchain.lock.json` as production evidence.
+```text
+ghcr.io/workpiece-gr/fdm-slicer-toolchain@sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739
+```
 
-Before any registry write is approved, reviewers need one deterministic packet binding the exact candidate to:
+`fdm-toolchain.publication.json` retains the factual publication evidence derived from the successful approved run, including:
+
+- frozen reviewed source commit `31ca0c983c7bf8b8a92ec44b7fa57b54ddbc9318`;
+- exact repository/tag/platform;
+- exact registry digest;
+- reviewed `Dockerfile.toolchain` SHA-256;
+- exact toolchain-manifest, package-inventory, and Orca-runtime SHA-256 values;
+- private package visibility;
+- successful pre-push byte verification and digest-pinned pull-back verification;
+- explicit evidence that no service image, deployment, physical qualification, or production enablement was performed.
+
+## Why the pre-publication handoff existed
+
+The CP5 candidate workflow proved that the pinned Ubuntu/Orca toolchain and parallel authority service could build and execute the FDM authority smoke chain. Its local Docker image IDs were useful candidate evidence, but they were **not registry manifest digests** and could not be copied into `fdm-toolchain.lock.json` as production evidence.
+
+Before the registry write was approved, reviewers required one deterministic packet binding the exact candidate to:
 
 - exact service commit;
-- exact committed `fdm-toolchain.lock.json` bytes;
+- exact then-unpublished `fdm-toolchain.lock.json` bytes;
 - exact `Dockerfile.toolchain` bytes;
 - exact `Dockerfile.authority` bytes;
 - exact extracted toolchain manifest;
@@ -23,9 +40,9 @@ Before any registry write is approved, reviewers need one deterministic packet b
 
 `app/fdm_toolchain_publication_review.py` creates that packet as `fdm-toolchain-publication-review/1.0.0`.
 
-## Safety properties
+## Safety properties retained in code
 
-The packet is deliberately non-authoritative. It always records:
+The pre-publication packet is deliberately non-authoritative. It always records:
 
 - `authorityState: publication_review_candidate`;
 - `authorityCriticalComplete: false`;
@@ -36,48 +53,43 @@ The packet is deliberately non-authoritative. It always records:
 - `production.productionEnablementPerformed: false`;
 - `retainedCandidateEvidence.localImageIdsAreRegistryDigests: false`.
 
-A published lock cannot be represented as a pre-publication packet. The generator fails closed if the lock is already `published`, if exact package/runtime evidence drifts from the toolchain manifest, if the source commit is not a full SHA, or if the local candidate image IDs are not content-addressed Docker image IDs.
+A published lock cannot be represented as a pre-publication packet. The generator still fails closed if the lock is already `published`, if exact package/runtime evidence drifts from the toolchain manifest, if the source commit is not a full SHA, or if the local candidate image IDs are not content-addressed Docker image IDs.
 
-This packet does **not** qualify a physical printer, replace the RatRig qualification receipt/evidence contract, remove human review, or change `/v1/project`.
+The unit suite now exercises this contract with a **synthetic unpublished lock** and separately proves that the real committed published lock cannot be misrepresented as pre-publication evidence.
 
-## Read-only review workflow
+## Workflow retirement
 
-`.github/workflows/cp5-publication-review.yml` is a review-only workflow. It:
+The former `.github/workflows/cp5-publication-review.yml` was intentionally read-only and was used to prepare the approved candidate. After successful publication and digest verification it is retired from the published repository state, because automatically rebuilding a “pre-publication review packet” from a committed published lock would be semantically wrong and the generator correctly rejects that state.
 
-1. runs CP5 provenance/publication-review unit tests;
-2. builds `Dockerfile.toolchain` locally;
-3. extracts the exact manifest, package inventory and Orca runtime bytes;
-4. records the local toolchain image ID;
-5. builds `Dockerfile.authority` on that local toolchain candidate;
-6. records the local service image ID;
-7. generates `publication-review-packet.json`;
-8. proves the committed lock is still unpublished and the workflow contains no registry-write capability;
-9. uploads only the review evidence artifact.
+Published-state verification is now handled by `.github/workflows/cp5-published-toolchain.yml`, which:
 
-The workflow has only `contents: read` permission. It does not request package-write permission, authenticate to GHCR, push an image, change the lock, or deploy anything.
+1. validates the committed published lock and retained publication record;
+2. authenticates to GHCR with `packages: read` only;
+3. pulls the exact image by immutable digest;
+4. re-extracts the manifest, package inventory, and Orca runtime bytes;
+5. validates them against the lock;
+6. re-hashes them against the retained publication record;
+7. uploads verification evidence only.
 
-## Required review before publication
+It has no package-write permission and no push command.
 
-When this checkpoint is merged, a future publication should still remain a separate operator-controlled action. Before asking for publication approval:
+## Future re-publication rule
 
-1. run the publication-review workflow from the exact reviewed source state intended for publication;
-2. retain `publication-review-packet.json`, `toolchain-manifest.json`, `packages.txt`, and both local image-ID files;
-3. verify the packet source commit and recipe/lock hashes against the reviewed source;
-4. verify the packet still says publication was not performed and production authority is not eligible;
-5. review the pinned base image, Orca release asset identity/SHA, runtime SHA and package-inventory SHA;
-6. obtain explicit approval for the registry publication itself.
+If the toolchain repository, review tag, platform, base-image digest, Orca pins, `Dockerfile.toolchain`, or any reviewed toolchain bytes change in the future, the current published digest must not be reused. A new candidate must return to the same pre-publication review process, obtain explicit approval, be published separately, be independently resolved/pulled by digest, and only then receive a new focused lock-transition review.
 
-No registry digest exists until that approved publication occurs. Do not infer or fabricate one from a local Docker image ID.
+Local Docker image IDs must never substitute for a registry digest.
 
-## Required steps after an approved publication
+## Still separate after toolchain publication
 
-After an explicitly approved publication, but before production authority can be enabled:
+The following remain independent deliberate gates:
 
-1. capture the exact registry-returned `sha256:` digest for the published toolchain image;
-2. independently verify the digest-pinned published image is the reviewed toolchain candidate;
-3. update `fdm-toolchain.lock.json` in a separate reviewed checkpoint to `status: published` with that exact digest;
-4. build the exact final service execution image from the digest-pinned toolchain image;
-5. capture and review the final service execution image by digest;
-6. keep the production-authority service disabled until genuine RatRig physical qualification evidence and the remaining deliberate provider/configuration gates are complete.
+- final Authority service image publication and digest verification;
+- production-authority service deployment;
+- production credentials/provider configuration;
+- genuine RatRig physical qualification and immutable evidence;
+- website production-mode enablement;
+- migration away from `/v1/project`;
+- per-order human workshop review;
+- Ender qualification.
 
-Merge, publication, provider configuration, and deployment remain separate actions.
+Toolchain publication is provenance preparation, not deployment or manufacturing qualification.

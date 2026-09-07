@@ -1,8 +1,8 @@
 {
   "schema": "workpiece-fdm-toolchain-lock-v1",
-  "status": "unpublished",
+  "status": "published",
   "image": "ghcr.io/workpiece-gr/fdm-slicer-toolchain",
-  "digest": null,
+  "digest": "sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739",
   "tag": "orca-2.4.2-noble-20260810-amd64",
   "build_recipe": "Dockerfile.toolchain",
   "service_recipe": "Dockerfile.authority",

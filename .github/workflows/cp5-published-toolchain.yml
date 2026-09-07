@@ -1,0 +1,174 @@
+name: FDM v2 CP5 published toolchain verification
+
+on:
+  pull_request:
+    paths:
+      - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
+      - "Dockerfile.toolchain"
+      - "app/fdm_toolchain_provenance.py"
+      - "tests/test_fdm_toolchain_provenance.py"
+      - "tests/test_fdm_toolchain_contract.py"
+      - ".github/workflows/cp5-published-toolchain.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
+      - "Dockerfile.toolchain"
+      - "app/fdm_toolchain_provenance.py"
+      - "tests/test_fdm_toolchain_provenance.py"
+      - "tests/test_fdm_toolchain_contract.py"
+      - ".github/workflows/cp5-published-toolchain.yml"
+  workflow_dispatch:
+
+# Read-only verification of the exact already-published CP5 toolchain. This
+# workflow may authenticate only to pull the private package by immutable digest.
+# It must never push, mutate the package, update the lock, deploy, or qualify a
+# physical machine.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  verify-published-toolchain:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate published lock and retained publication receipt
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import re
+          from pathlib import Path
+
+          from app.fdm_toolchain_provenance import validate_toolchain_lock
+
+          lock_bytes = Path('fdm-toolchain.lock.json').read_bytes()
+          lock = validate_toolchain_lock(lock_bytes, require_published=True)
+          publication = json.loads(Path('fdm-toolchain.publication.json').read_text(encoding='utf-8'))
+
+          assert publication['schema'] == 'workpiece-fdm-toolchain-publication-v1'
+          assert re.fullmatch(r'[0-9a-f]{40}', publication['approved_frozen_source_commit'])
+          assert publication['image'] == lock['image']
+          assert publication['tag'] == lock['tag']
+          assert publication['platform'] == lock['platform']
+          assert publication['registry_digest'] == lock['digest']
+          assert publication['package_visibility'] == 'private'
+          assert publication['pre_push_bytes_verified'] is True
+          assert publication['digest_pinned_pullback_verified'] is True
+          assert publication['service_image_published'] is False
+          assert publication['deployment_performed'] is False
+          assert publication['machine_qualification_performed'] is False
+          assert publication['production_enablement_performed'] is False
+          assert hashlib.sha256(Path('Dockerfile.toolchain').read_bytes()).hexdigest() == publication['toolchain_recipe_sha256']
+
+          image_ref = f"{lock['image']}@{lock['digest']}"
+          Path('/tmp/cp5-published-image-ref.txt').write_text(image_ref + '\n', encoding='utf-8')
+          print(json.dumps({'imageRef': image_ref, 'publication': publication}, indent=2))
+          PY
+          echo "IMAGE_REF=$(cat /tmp/cp5-published-image-ref.txt)" >> "$GITHUB_ENV"
+
+      - name: Authenticate to GHCR for read-only pull
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull exact published toolchain by digest
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE_REF"
+          test "$(docker image inspect --format '{{.Architecture}}' "$IMAGE_REF")" = "amd64"
+
+      - name: Extract and verify exact published bytes
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cp5-published
+          container_id=$(docker create "$IMAGE_REF")
+          trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+          docker cp "$container_id:/opt/workpiece-toolchain/manifest.json" /tmp/cp5-published/toolchain-manifest.json
+          docker cp "$container_id:/opt/workpiece-toolchain/packages.txt" /tmp/cp5-published/packages.txt
+          docker cp "$container_id:/opt/orca/squashfs-root/AppRun" /tmp/cp5-published/orca-AppRun
+          docker rm "$container_id"
+          trap - EXIT
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          from app.fdm_toolchain_provenance import validate_toolchain_lock, validate_toolchain_manifest
+
+          lock_bytes = Path('fdm-toolchain.lock.json').read_bytes()
+          publication = json.loads(Path('fdm-toolchain.publication.json').read_text(encoding='utf-8'))
+          manifest_bytes = Path('/tmp/cp5-published/toolchain-manifest.json').read_bytes()
+          packages_bytes = Path('/tmp/cp5-published/packages.txt').read_bytes()
+          runtime_bytes = Path('/tmp/cp5-published/orca-AppRun').read_bytes()
+
+          lock = validate_toolchain_lock(lock_bytes, require_published=True)
+          manifest = validate_toolchain_manifest(
+              lock_bytes=lock_bytes,
+              manifest_bytes=manifest_bytes,
+              orca_runtime_bytes=runtime_bytes,
+          )
+
+          assert hashlib.sha256(manifest_bytes).hexdigest() == publication['toolchain_manifest_sha256']
+          assert hashlib.sha256(packages_bytes).hexdigest() == publication['package_inventory_sha256']
+          assert hashlib.sha256(runtime_bytes).hexdigest() == publication['orca_runtime_sha256']
+          assert manifest['packages_sha256'] == publication['package_inventory_sha256']
+          assert manifest['orca_runtime_sha256'] == publication['orca_runtime_sha256']
+
+          evidence = {
+              'contractVersion': 'fdm-toolchain-published-verification/1.0.0',
+              'authorityState': 'published_toolchain_verified',
+              'authorityCriticalComplete': False,
+              'imageReference': f"{lock['image']}@{lock['digest']}",
+              'registryDigest': lock['digest'],
+              'toolchainManifestSha256': hashlib.sha256(manifest_bytes).hexdigest(),
+              'packageInventorySha256': hashlib.sha256(packages_bytes).hexdigest(),
+              'orcaRuntimeSha256': hashlib.sha256(runtime_bytes).hexdigest(),
+              'serviceImagePublished': False,
+              'deploymentPerformed': False,
+              'machineQualificationPerformed': False,
+              'productionEnablementPerformed': False,
+          }
+          Path('/tmp/cp5-published/verification.json').write_text(
+              json.dumps(evidence, sort_keys=True, indent=2) + '\n', encoding='utf-8'
+          )
+          print(json.dumps(evidence, indent=2))
+          PY
+
+      - name: Prove verifier has no registry-write path
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/cp5-published-toolchain.yml').read_text(encoding='utf-8').lower()
+          required = ['packages: read', 'docker pull']
+          forbidden = ['packages:' + ' write', 'docker ' + 'push', '--' + 'push']
+          for token in required:
+              assert token in workflow, f'missing read-only verification token: {token}'
+          for token in forbidden:
+              assert token not in workflow, f'publication-capable token present: {token}'
+          PY
+
+      - name: Upload published verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp5-published-toolchain-verification
+          path: |
+            /tmp/cp5-published/verification.json
+            /tmp/cp5-published/toolchain-manifest.json
+            /tmp/cp5-published/packages.txt
+          if-no-files-found: error
+          retention-days: 30

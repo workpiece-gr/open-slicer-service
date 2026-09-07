@@ -1,0 +1,22 @@
+{
+  "schema": "workpiece-fdm-toolchain-publication-v1",
+  "approved_frozen_source_commit": "31ca0c983c7bf8b8a92ec44b7fa57b54ddbc9318",
+  "image": "ghcr.io/workpiece-gr/fdm-slicer-toolchain",
+  "tag": "orca-2.4.2-noble-20260810-amd64",
+  "platform": "linux/amd64",
+  "registry_digest": "sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739",
+  "toolchain_recipe_sha256": "a9143703f78f5ef113215e327caa4f99b1a568c6530b0899d42a61c28c0bbe69",
+  "toolchain_manifest_sha256": "d57402d8eed0395dadf954596512b083e718d7871e1f7c966ab27ba09c44cfe2",
+  "package_inventory_sha256": "7fc58fa2c7f3abb40ed8d7c1d973a01ea7f15953c41cb62288b250890e720f4a",
+  "orca_runtime_sha256": "22f863d5c66cfcf7748106eb44eabc2f807385738d790582f5f6b20ab5e2616e",
+  "package_visibility": "private",
+  "pre_push_bytes_verified": true,
+  "digest_pinned_pullback_verified": true,
+  "publication_workflow_run_id": 34058405080,
+  "publication_artifact_name": "cp5-approved-toolchain-publication",
+  "publication_artifact_digest": "sha256:3e9a285a2d64ae3529bd0486b071e5e48011878126c0e948ad7de51155b9d3be",
+  "service_image_published": false,
+  "deployment_performed": false,
+  "machine_qualification_performed": false,
+  "production_enablement_performed": false
+}
