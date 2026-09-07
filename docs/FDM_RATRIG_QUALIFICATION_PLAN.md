@@ -39,7 +39,7 @@ Expected exact source hashes:
 | --- | --- | --- |
 | `qualification-dimensions-v1.stl` | 20 mm cube, 100 mm bar, 40 mm tower | `52f02a382c62e4e659fa7df8df055389f76da89e1265a63fec4ebc6752083bbb` |
 | `qualification-holes-v1.stl` | 5/10/20 mm nominal internal rings and matching external pins | `ce1237ea41ac74feee93b8e4b5c811f2b329de0f816ec238d89e4847b47a74ec` |
-| `qualification-bridge-support-v1.stl` | automatic-support handling of a 40 mm clear span | `db46b42154134ac70861d9a75697fa884433abc95c8bb342b82fbf8071afc176` |
+| `qualification-bridge-support-v1.stl` | single-body automatic-support handling of a 40 mm clear span | `cb4a9639617841e08647c634d62417513d60d39eb12a7a2ff850dcaab261d56a` |
 
 If any generated hash differs, stop. Do not use the changed file as qualification evidence until the fixture version is deliberately updated and reviewed.
 
@@ -108,7 +108,7 @@ Use the pre-frozen hole/external-feature criteria. Do not call a profile qualifi
 
 ### Q3 — automatic supports / span handling
 
-Print `qualification-bridge-support-v1.stl`, quantity 1, through the normal Authority automatic-support policy.
+Print `qualification-bridge-support-v1.stl`, quantity 1, through the normal Authority automatic-support policy. The fixture is one connected manifold U-shaped body, so the 40 mm clear span cannot be split and auto-arranged as separate STL shells.
 
 Record:
 
