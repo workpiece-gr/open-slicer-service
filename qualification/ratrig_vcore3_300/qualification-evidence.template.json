@@ -55,8 +55,8 @@
     },
     {
       "filename": "qualification-bridge-support-v1.stl",
-      "sha256": "db46b42154134ac70861d9a75697fa884433abc95c8bb342b82fbf8071afc176",
-      "purpose": "automatic-support handling of a 40 mm clear span"
+      "sha256": "cb4a9639617841e08647c634d62417513d60d39eb12a7a2ff850dcaab261d56a",
+      "purpose": "single-body automatic-support handling of a 40 mm clear span"
     }
   ],
   "runs": [],
