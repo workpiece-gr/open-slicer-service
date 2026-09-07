@@ -51,6 +51,7 @@ class PreparedFdmAuthorityProject:
     base_env: Mapping[str, str]
     project_bytes: int
     layout_repair_applied: bool
+    layout_repair: dict
 
 
 def prepare_fdm_authority_project(
@@ -128,6 +129,20 @@ def prepare_fdm_authority_project(
     if embedded.get("project_settings") is not True or embedded.get("model_settings") is not True:
         raise ValueError("Authority production 3MF does not retain the required embedded project/model settings.")
 
+    geometry_stability = {
+        "policy": dict(layout_repair.get("stability") or {}),
+        "warnings": list(layout_repair.get("warnings") or []),
+        "notices": list(layout_repair.get("notices") or []),
+        "placements": [
+            {
+                "objectId": placement.get("object_id"),
+                "plateIndex": placement.get("plate_index"),
+                "footprintMm": placement.get("footprint_mm"),
+                "stability": dict(placement.get("stability") or {}),
+            }
+            for placement in layout_repair.get("placements") or []
+        ],
+    }
     generation_receipt = {
         "source": {"sha256": sha256_file(source_path)},
         "printer": {"key": RATRIG_PRINTER_KEY, "temporary_generic": False},
@@ -144,7 +159,10 @@ def prepare_fdm_authority_project(
             "version": ORCA_VERSION,
             "service_commit": SERVICE_COMMIT_SHA.lower(),
         },
-        "project": {"sha256": sha256_file(project_path)},
+        "project": {
+            "sha256": sha256_file(project_path),
+            "geometry_stability": geometry_stability,
+        },
         "request": {
             "material": material,
             "quality": quality,
@@ -168,4 +186,5 @@ def prepare_fdm_authority_project(
         base_env=generation_env,
         project_bytes=project_size,
         layout_repair_applied=layout_repair is not None,
+        layout_repair=layout_repair,
     )
