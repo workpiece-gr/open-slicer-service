@@ -12,6 +12,7 @@ def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
     assert "ARG TOOLCHAIN_IMAGE=workpiece-fdm-toolchain:local" in authority
     assert "FROM ${TOOLCHAIN_IMAGE}" in authority
     assert "COPY fdm-toolchain.lock.json" in authority
+    assert "COPY fdm-service.lock.json" not in authority
     assert "ARG TOOLCHAIN_IMAGE=" not in live
     assert "FROM ubuntu:24.04" in live
 
@@ -37,6 +38,20 @@ def test_toolchain_recipe_pins_exact_base_and_orca_asset_from_published_lock():
     assert lock["orca"]["asset"] in recipe
     assert lock["orca"]["asset_sha256"] in recipe
     assert "sha256sum -c -" in recipe
+
+
+def test_final_service_lock_starts_unpublished_and_binds_exact_published_toolchain():
+    service = json.loads((ROOT / "fdm-service.lock.json").read_text(encoding="utf-8"))
+    toolchain = json.loads((ROOT / "fdm-toolchain.lock.json").read_text(encoding="utf-8"))
+    assert service["schema"] == "workpiece-fdm-authority-service-lock-v1"
+    assert service["status"] == "unpublished"
+    assert service["digest"] is None
+    assert service["source_commit"] is None
+    assert service["image"] == "ghcr.io/workpiece-gr/fdm-authority-service"
+    assert service["platform"] == "linux/amd64"
+    assert service["build_recipe"] == "Dockerfile.authority"
+    assert service["toolchain"]["image"] == toolchain["image"]
+    assert service["toolchain"]["digest"] == toolchain["digest"]
 
 
 def test_cp5_candidate_ci_cannot_publish_or_write_packages():
@@ -65,3 +80,15 @@ def test_published_toolchain_verifier_is_read_only():
     assert "docker push" not in workflow
     assert "--push" not in workflow
     assert "docker pull" in workflow
+
+
+def test_final_service_image_review_is_read_only_and_non_publishing():
+    workflow = (ROOT / ".github/workflows/cp5-service-image-review.yml").read_text(encoding="utf-8").lower()
+    assert "contents: read" in workflow
+    assert "packages: read" in workflow
+    assert "packages: write" not in workflow
+    assert "docker push" not in workflow
+    assert "--push" not in workflow
+    assert "docker pull" in workflow
+    assert "publication']['performed'] is false" in workflow
+    assert "packet['production']['productionauthorityeligible'] is false" in workflow
