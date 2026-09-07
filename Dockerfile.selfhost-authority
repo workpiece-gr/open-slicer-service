@@ -1,0 +1,119 @@
+# syntax=docker/dockerfile:1.7
+
+# Self-hostable FDM Authority v2 image built entirely from public source inputs.
+#
+# This is intentionally separate from Dockerfile and Dockerfile.authority:
+# - Dockerfile remains the legacy/live /v1 project-service build.
+# - Dockerfile.authority consumes the separately published CP5 toolchain image.
+# - this file rebuilds the pinned toolchain from source for Railway Trial and
+#   future Workpiece-owned Linux hosts where registry access is undesirable.
+#
+# IMPORTANT: a source-built image is NOT the already-published production
+# Authority image and must never claim that registry digest. Production
+# authority remains fail-closed until the running image itself is deliberately
+# reviewed/published/locked and genuine RatRig qualification evidence exists.
+
+ARG BASE_IMAGE=ubuntu:noble-20260810@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG ORCA_VERSION=2.4.2
+ARG ORCA_ASSET=OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage
+ARG ORCA_ASSET_SHA256=d12fb8c8eac1aecd2dfb6377acd48f994f8fa439ed5292fa532dd82880f029fd
+
+LABEL org.opencontainers.image.title="Workpiece FDM Authority v2 self-host build" \
+      org.opencontainers.image.source="https://github.com/workpiece-gr/open-slicer-service" \
+      workpiece.orcaslicer.version="${ORCA_VERSION}" \
+      workpiece.orcaslicer.asset.sha256="${ORCA_ASSET_SHA256}"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    ORCA_VERSION=${ORCA_VERSION} \
+    ORCA_BIN=/opt/orca/squashfs-root/AppRun \
+    PROFILE_ROOT=/app/profiles \
+    FDM_TOOLCHAIN_LOCK=/app/fdm-toolchain.lock.json \
+    FDM_TOOLCHAIN_MANIFEST=/opt/workpiece-toolchain/manifest.json \
+    FDM_PACKAGE_INVENTORY=/opt/workpiece-toolchain/packages.txt \
+    FDM_SERVICE_LOCK=/app/fdm-service.lock.json \
+    PORT=8080
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl python3 python3-venv xvfb \
+      libdbus-1-3 libegl1 libgl1 libglu1-mesa libopengl0 libglib2.0-0t64 libgtk-3-0t64 \
+      libwebkit2gtk-4.1-0 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+      libx11-6 libxext6 libxi6 libxkbcommon0 libxkbcommon-x11-0 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/orca \
+    && curl --fail --location --retry 3 \
+      "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v${ORCA_VERSION}/${ORCA_ASSET}" \
+      -o /tmp/orca.AppImage \
+    && echo "${ORCA_ASSET_SHA256}  /tmp/orca.AppImage" | sha256sum -c - \
+    && chmod +x /tmp/orca.AppImage \
+    && cd /opt/orca \
+    && /tmp/orca.AppImage --appimage-extract \
+    && rm /tmp/orca.AppImage \
+    && test -x "${ORCA_BIN}"
+
+RUN mkdir -p /opt/workpiece-toolchain \
+    && dpkg-query -W -f='${Package}\t${Version}\n' | LC_ALL=C sort > /opt/workpiece-toolchain/packages.txt \
+    && BASE_IMAGE="${BASE_IMAGE}" ORCA_VERSION="${ORCA_VERSION}" ORCA_ASSET="${ORCA_ASSET}" ORCA_ASSET_SHA256="${ORCA_ASSET_SHA256}" \
+       python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+runtime = Path('/opt/orca/squashfs-root/AppRun')
+packages = Path('/opt/workpiece-toolchain/packages.txt')
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    with path.open('rb') as handle:
+        while chunk := handle.read(1024 * 1024):
+            value.update(chunk)
+    return value.hexdigest()
+
+manifest = {
+    'schema': 'workpiece-fdm-toolchain-v1',
+    'platform': 'linux/amd64',
+    'base_image': os.environ['BASE_IMAGE'],
+    'orca_version': os.environ['ORCA_VERSION'],
+    'orca_asset': os.environ['ORCA_ASSET'],
+    'orca_asset_sha256': os.environ['ORCA_ASSET_SHA256'],
+    'orca_runtime_path': str(runtime),
+    'orca_runtime_sha256': digest(runtime),
+    'packages_sha256': digest(packages),
+}
+Path('/opt/workpiece-toolchain/manifest.json').write_text(
+    json.dumps(manifest, sort_keys=True, indent=2) + '\n',
+    encoding='utf-8',
+)
+PY
+
+RUN test -x /opt/orca/squashfs-root/AppRun \
+    && test -s /opt/workpiece-toolchain/manifest.json \
+    && test -s /opt/workpiece-toolchain/packages.txt
+
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+COPY profiles ./profiles
+COPY fdm-toolchain.lock.json ./fdm-toolchain.lock.json
+COPY fdm-service.lock.json ./fdm-service.lock.json
+
+RUN useradd --create-home --uid 10001 slicer \
+    && chown -R slicer:slicer /app /opt/venv /opt/workpiece-toolchain /opt/orca
+USER slicer
+
+EXPOSE 8080
+
+# Production API remains disabled unless ENABLE_FDM_AUTHORITY_V2_PRODUCTION_API
+# is deliberately set after all external qualification/deployment gates pass.
+CMD ["sh", "-c", "uvicorn app.authority_production_api:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]
