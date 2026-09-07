@@ -1,0 +1,13 @@
+{
+  "schema": "workpiece-fdm-authority-service-lock-v1",
+  "status": "unpublished",
+  "image": "ghcr.io/workpiece-gr/fdm-authority-service",
+  "digest": null,
+  "source_commit": null,
+  "platform": "linux/amd64",
+  "build_recipe": "Dockerfile.authority",
+  "toolchain": {
+    "image": "ghcr.io/workpiece-gr/fdm-slicer-toolchain",
+    "digest": "sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739"
+  }
+}
