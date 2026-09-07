@@ -301,9 +301,9 @@ jobs:
               'packages:' + ' write',
               'docker ' + 'push',
               '--' + 'push',
-              'gh api --method post',
-              'gh api --method patch',
-              'gh api --method delete',
+              'gh api --method ' + 'post',
+              'gh api --method ' + 'patch',
+              'gh api --method ' + 'delete',
           ]
           for token in forbidden:
               assert token not in workflow, f'registry-write-capable token present: {token}'
