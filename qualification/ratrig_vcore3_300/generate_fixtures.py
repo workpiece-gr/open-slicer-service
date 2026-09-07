@@ -124,11 +124,33 @@ def holes_fixture():
 
 def bridge_support_fixture():
     mesh = Mesh("workpiece_ratrig_bridge_support_v1")
-    # Three independent closed bodies. The 0.20 mm vertical separation keeps
-    # the STL manifold while forcing automatic-support handling of a 40 mm span.
-    mesh.box(0, 0, 0, 10, 12, 19.8)
-    mesh.box(50, 0, 0, 60, 12, 19.8)
-    mesh.box(0, 0, 20, 60, 12, 25)
+
+    # One connected U-shaped solid with a 40 mm clear span. Build it as an
+    # exposed-face 1 mm grid extrusion so the result is a single watertight
+    # manifold body with no overlapping internal faces.
+    occupied = set()
+    for x in range(0, 10):
+        for z in range(0, 20):
+            occupied.add((x, z))
+    for x in range(50, 60):
+        for z in range(0, 20):
+            occupied.add((x, z))
+    for x in range(0, 60):
+        for z in range(20, 25):
+            occupied.add((x, z))
+
+    y0, y1 = 0, 12
+    for x, z in sorted(occupied):
+        mesh.quad((x, y0, z), (x, y0, z + 1), (x + 1, y0, z + 1), (x + 1, y0, z))
+        mesh.quad((x, y1, z), (x + 1, y1, z), (x + 1, y1, z + 1), (x, y1, z + 1))
+        if (x - 1, z) not in occupied:
+            mesh.quad((x, y0, z), (x, y1, z), (x, y1, z + 1), (x, y0, z + 1))
+        if (x + 1, z) not in occupied:
+            mesh.quad((x + 1, y0, z), (x + 1, y0, z + 1), (x + 1, y1, z + 1), (x + 1, y1, z))
+        if (x, z - 1) not in occupied:
+            mesh.quad((x, y0, z), (x + 1, y0, z), (x + 1, y1, z), (x, y1, z))
+        if (x, z + 1) not in occupied:
+            mesh.quad((x, y0, z + 1), (x, y1, z + 1), (x + 1, y1, z + 1), (x + 1, y0, z + 1))
     return mesh
 
 
