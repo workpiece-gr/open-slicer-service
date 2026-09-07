@@ -2,10 +2,10 @@
 
 This app is intentionally distinct from both ``app.main:app`` and the candidate
 Authority-v2 app. Merely merging this module cannot expose a route. A deployment
-must deliberately start this app, enable its independent flag/token, run from a
-digest-pinned image, use a committed *published* CP5 lock, and mount the exact
-machine-qualification receipt plus its retained physical-evidence artifact before
-a request can reach the authority pipeline.
+must deliberately start this app, enable its independent flag/token, run from
+the exact separately published service image, use the committed published CP5
+toolchain lock, and mount the exact service-image lock plus machine qualification
+receipt/evidence before a request can reach the authority pipeline.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 
 from .fdm_authority_http_project import FdmAuthoritySourceError, RATRIG_PRINTER_KEY, prepare_fdm_authority_project
 from .fdm_authority_production import FDM_AUTHORITY_PRODUCTION_API_VERSION, build_fdm_authority_production
+from .fdm_service_image import validate_published_service_runtime
 from .fdm_toolchain_provenance import validate_toolchain_lock
 from .main import MATERIALS, MAX_PROJECT_QUANTITY, ORCA_BIN, SERVICE_COMMIT_SHA, SLICE_TIMEOUT_SECONDS, profiles_ready, save_upload
 
@@ -36,6 +37,7 @@ MAX_AUTHORITY_BUNDLE_BYTES = max(1, int(os.getenv("MAX_FDM_AUTHORITY_BUNDLE_BYTE
 FDM_TOOLCHAIN_LOCK = Path(os.getenv("FDM_TOOLCHAIN_LOCK", "/app/fdm-toolchain.lock.json"))
 FDM_TOOLCHAIN_MANIFEST = Path(os.getenv("FDM_TOOLCHAIN_MANIFEST", "/opt/workpiece-toolchain/manifest.json"))
 FDM_PACKAGE_INVENTORY = Path(os.getenv("FDM_PACKAGE_INVENTORY", "/opt/workpiece-toolchain/packages.txt"))
+FDM_SERVICE_LOCK = Path(os.getenv("FDM_SERVICE_LOCK", "/app/fdm-service.lock.json"))
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[a-f0-9]{64}$")
 _COMMIT = re.compile(r"^[a-f0-9]{40}$")
@@ -59,6 +61,21 @@ def _published_lock_ready() -> bool:
     return True
 
 
+def _published_service_runtime_ready() -> bool:
+    if not FDM_SERVICE_LOCK.is_file() or not FDM_TOOLCHAIN_LOCK.is_file():
+        return False
+    try:
+        validate_published_service_runtime(
+            service_lock_bytes=FDM_SERVICE_LOCK.read_bytes(),
+            toolchain_lock_bytes=FDM_TOOLCHAIN_LOCK.read_bytes(),
+            runtime_image_ref=WORKPIECE_FDM_AUTHORITY_RUNTIME_REF,
+            service_commit=SERVICE_COMMIT_SHA.lower(),
+        )
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def production_config_status() -> dict[str, bool]:
     return {
         "enabled": ENABLE_FDM_AUTHORITY_V2_PRODUCTION_API,
@@ -66,6 +83,7 @@ def production_config_status() -> dict[str, bool]:
         "service_commit": bool(_COMMIT.fullmatch(SERVICE_COMMIT_SHA.lower())),
         "runtime_digest_ref": bool(_DIGEST_REF.fullmatch(WORKPIECE_FDM_AUTHORITY_RUNTIME_REF)),
         "published_toolchain_lock": _published_lock_ready(),
+        "published_service_runtime": _published_service_runtime_ready(),
         "machine_qualification_receipt": FDM_MACHINE_QUALIFICATION_RECEIPT.is_file(),
         "machine_qualification_evidence": FDM_MACHINE_QUALIFICATION_EVIDENCE.is_file(),
         "orca_runtime": ORCA_BIN.is_file(),
@@ -92,8 +110,8 @@ def production_access(authorization: Annotated[str | None, Header()] = None):
     status = production_config_status()
     required = (
         "service_commit",
-        "runtime_digest_ref",
         "published_toolchain_lock",
+        "published_service_runtime",
         "machine_qualification_receipt",
         "machine_qualification_evidence",
         "orca_runtime",
@@ -189,6 +207,7 @@ async def build_authority_production(
                 timeout_seconds=SLICE_TIMEOUT_SECONDS,
                 service_commit=SERVICE_COMMIT_SHA.lower(),
                 runtime_image_ref=WORKPIECE_FDM_AUTHORITY_RUNTIME_REF,
+                service_lock_bytes=FDM_SERVICE_LOCK.read_bytes(),
                 machine_qualification_evidence_id="",
                 toolchain_lock_bytes=FDM_TOOLCHAIN_LOCK.read_bytes(),
                 toolchain_manifest_bytes=FDM_TOOLCHAIN_MANIFEST.read_bytes(),
@@ -210,9 +229,6 @@ async def build_authority_production(
             "authorityState": result.authority_state,
             "authorityIssues": list(result.authority_issues),
             "technicalProductionAuthority": True,
-            # Technical authority does not bypass the downstream human-review
-            # gate. The website may approve/order only after re-verifying this
-            # exact evidence package and recording the human decision.
             "productionOrderEligible": False,
             "productionEnablementPerformed": False,
             "humanReview": {"required": True, "status": "pending"},
