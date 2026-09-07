@@ -6,6 +6,7 @@ on:
       - "Dockerfile.toolchain"
       - "Dockerfile.authority"
       - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
       - "app/fdm_toolchain_provenance.py"
       - "tests/test_fdm_toolchain_provenance.py"
       - ".github/workflows/cp5-immutable-toolchain.yml"
@@ -20,6 +21,7 @@ on:
       - "Dockerfile.toolchain"
       - "Dockerfile.authority"
       - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
       - "app/fdm_toolchain_provenance.py"
       - "tests/test_fdm_toolchain_provenance.py"
       - ".github/workflows/cp5-immutable-toolchain.yml"
@@ -67,13 +69,13 @@ jobs:
           lock_bytes = Path('fdm-toolchain.lock.json').read_bytes()
           manifest_bytes = Path('/tmp/cp5-evidence/toolchain-manifest.json').read_bytes()
           runtime_bytes = Path('/tmp/cp5-evidence/orca-AppRun').read_bytes()
-          lock = validate_toolchain_lock(lock_bytes)
+          lock = validate_toolchain_lock(lock_bytes, require_published=True)
           manifest = validate_toolchain_manifest(
               lock_bytes=lock_bytes,
               manifest_bytes=manifest_bytes,
               orca_runtime_bytes=runtime_bytes,
           )
-          assert lock['status'] == 'unpublished'
+          assert lock['status'] == 'published'
           assert manifest['orca_version'] == '2.4.2'
           assert manifest['orca_runtime_sha256'] == hashlib.sha256(runtime_bytes).hexdigest()
           assert manifest['packages_sha256'] == hashlib.sha256(Path('/tmp/cp5-evidence/packages.txt').read_bytes()).hexdigest()
@@ -117,7 +119,7 @@ jobs:
           )
           assert receipt['authorityState'] == 'evidence_candidate'
           assert receipt['authorityCriticalComplete'] is False
-          assert receipt['lockStatus'] == 'unpublished'
+          assert receipt['lockStatus'] == 'published'
           Path('/tmp/cp5-evidence/candidate-provenance.json').write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
           PY
 
@@ -250,7 +252,7 @@ jobs:
                   process_profile_bytes=process_bytes,
                   filament_profile_bytes=filament_bytes,
                   validator_service_commit=os.environ['SOURCE_COMMIT_SHA'],
-                  toolchain_ref='cp5-candidate://unpublished-toolchain',
+                  toolchain_ref='cp5-candidate://local-toolchain',
               )
               assert validation['passed'] is True
               assert validation['authorityCriticalComplete'] is True

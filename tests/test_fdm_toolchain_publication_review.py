@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import json
 from pathlib import Path
@@ -12,11 +11,25 @@ from app.fdm_toolchain_publication_review import (
 
 
 ROOT = Path(__file__).parents[1]
-LOCK_BYTES = (ROOT / "fdm-toolchain.lock.json").read_bytes()
+COMMITTED_LOCK_BYTES = (ROOT / "fdm-toolchain.lock.json").read_bytes()
 TOOLCHAIN_RECIPE_BYTES = (ROOT / "Dockerfile.toolchain").read_bytes()
 SERVICE_RECIPE_BYTES = (ROOT / "Dockerfile.authority").read_bytes()
 RUNTIME_BYTES = b"exact extracted Orca AppRun bytes for publication review unit test\n"
 PACKAGE_BYTES = b"ca-certificates\t1\npython3\t2\n"
+
+
+def committed_lock_value() -> dict:
+    return json.loads(COMMITTED_LOCK_BYTES.decode("utf-8"))
+
+
+def unpublished_lock_bytes() -> bytes:
+    value = committed_lock_value()
+    value["status"] = "unpublished"
+    value["digest"] = None
+    return (json.dumps(value, indent=2) + "\n").encode()
+
+
+LOCK_BYTES = unpublished_lock_bytes()
 
 
 def lock_value() -> dict:
@@ -55,7 +68,7 @@ def build_packet(**overrides):
     return build_toolchain_publication_review_packet(**values)
 
 
-def test_committed_unpublished_lock_builds_non_authoritative_review_packet():
+def test_synthetic_unpublished_lock_builds_non_authoritative_review_packet():
     packet = build_packet()
     assert packet["contractVersion"] == FDM_TOOLCHAIN_PUBLICATION_REVIEW_VERSION
     assert packet["authorityState"] == "publication_review_candidate"
@@ -81,13 +94,11 @@ def test_packet_binds_exact_recipe_and_evidence_bytes():
     assert packet["retainedCandidateEvidence"]["orcaRuntimeSha256"] == hashlib.sha256(RUNTIME_BYTES).hexdigest()
 
 
-def test_published_lock_cannot_be_misrepresented_as_prepublication_review():
-    value = copy.deepcopy(lock_value())
-    value["status"] = "published"
-    value["digest"] = "sha256:" + "b" * 64
-    lock_bytes = (json.dumps(value, indent=2) + "\n").encode()
+def test_committed_published_lock_cannot_be_misrepresented_as_prepublication_review():
+    value = committed_lock_value()
+    assert value["status"] == "published"
     with pytest.raises(ValueError, match="only be created from the unpublished"):
-        build_packet(lock_bytes=lock_bytes, manifest_bytes=manifest_bytes(value))
+        build_packet(lock_bytes=COMMITTED_LOCK_BYTES, manifest_bytes=manifest_bytes(value))
 
 
 def test_package_inventory_bytes_must_match_manifest():
