@@ -8,6 +8,7 @@ on:
       - "fdm-toolchain.lock.json"
       - "fdm-toolchain.publication.json"
       - "fdm-service.lock.json"
+      - "fdm-service.publication.json"
       - "app/**"
       - "profiles/**"
       - "tests/test_fdm_service_image.py"
@@ -22,6 +23,7 @@ on:
       - "fdm-toolchain.lock.json"
       - "fdm-toolchain.publication.json"
       - "fdm-service.lock.json"
+      - "fdm-service.publication.json"
       - "app/**"
       - "profiles/**"
       - "tests/test_fdm_service_image.py"
@@ -29,9 +31,10 @@ on:
       - ".github/workflows/cp5-service-image-review.yml"
   workflow_dispatch:
 
-# Phase-D review only. It may pull the already-published private toolchain with
-# read permission. It must never push the final service image, update either
-# lock, deploy, configure production, or create physical qualification evidence.
+# Phase-D candidate review only while the service lock is unpublished. Once a
+# reviewed service digest is published, this workflow validates the committed
+# publication state and skips rebuilding a new candidate. The separate
+# cp5-published-service workflow performs read-only registry verification.
 permissions:
   contents: read
   packages: read
@@ -62,7 +65,7 @@ jobs:
             tests/test_fdm_authority_production.py \
             tests/test_fdm_toolchain_contract.py
 
-      - name: Validate unpublished service lock against published toolchain
+      - name: Validate service publication state against published toolchain
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -79,18 +82,43 @@ jobs:
               toolchain_lock_bytes=toolchain_bytes,
               require_published=False,
           )
-          assert service['status'] == 'unpublished'
-          assert service['digest'] is None
-          assert service['source_commit'] is None
           assert service['toolchain']['image'] == toolchain['image']
           assert service['toolchain']['digest'] == toolchain['digest']
-          image_ref = f"{toolchain['image']}@{toolchain['digest']}"
-          Path('/tmp/cp5-toolchain-ref.txt').write_text(image_ref + '\n', encoding='utf-8')
-          print(json.dumps({'toolchainRef': image_ref, 'serviceReviewTarget': service['image']}, indent=2))
+
+          status = service['status']
+          if status == 'unpublished':
+              assert service['digest'] is None
+              assert service['source_commit'] is None
+              image_ref = f"{toolchain['image']}@{toolchain['digest']}"
+              Path('/tmp/cp5-toolchain-ref.txt').write_text(image_ref + '\n', encoding='utf-8')
+          else:
+              validate_service_lock(
+                  Path('fdm-service.lock.json').read_bytes(),
+                  toolchain_lock_bytes=toolchain_bytes,
+                  require_published=True,
+              )
+              publication_path = Path('fdm-service.publication.json')
+              assert publication_path.is_file(), 'Published service lock requires retained publication receipt.'
+              publication = json.loads(publication_path.read_text(encoding='utf-8'))
+              assert publication['schema'] == 'workpiece-fdm-authority-service-publication-v1'
+              assert publication['image'] == service['image']
+              assert publication['registry_digest'] == service['digest']
+              assert publication['approved_frozen_source_commit'] == service['source_commit']
+              assert publication['deployment_performed'] is False
+              assert publication['machine_qualification_performed'] is False
+              assert publication['production_enablement_performed'] is False
+              assert publication['human_review_still_required'] is True
+
+          Path('/tmp/cp5-service-review-state.txt').write_text(status + '\n', encoding='utf-8')
+          print(json.dumps({'serviceLockStatus': status, 'serviceImage': service['image']}, indent=2))
           PY
-          echo "TOOLCHAIN_REF=$(cat /tmp/cp5-toolchain-ref.txt)" >> "$GITHUB_ENV"
+          echo "SERVICE_REVIEW_STATE=$(cat /tmp/cp5-service-review-state.txt)" >> "$GITHUB_ENV"
+          if [ "$(cat /tmp/cp5-service-review-state.txt)" = "unpublished" ]; then
+            echo "TOOLCHAIN_REF=$(cat /tmp/cp5-toolchain-ref.txt)" >> "$GITHUB_ENV"
+          fi
 
       - name: Authenticate to GHCR for read-only toolchain pull
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -98,12 +126,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull exact published toolchain by digest
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         run: |
           set -euo pipefail
           docker pull "$TOOLCHAIN_REF"
           test "$(docker image inspect --format '{{.Architecture}}' "$TOOLCHAIN_REF")" = "amd64"
 
       - name: Re-verify exact published toolchain bytes
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         run: |
           set -euo pipefail
           mkdir -p /tmp/cp5-service-review/toolchain
@@ -132,6 +162,7 @@ jobs:
           PY
 
       - name: Remove transient Python bytecode from service build context
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         run: |
           set -euo pipefail
           find app profiles -type d -name __pycache__ -prune -exec rm -rf {} +
@@ -140,6 +171,7 @@ jobs:
           test -z "$(find app profiles -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)"
 
       - name: Build final service-image candidate on exact published toolchain
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         run: |
           set -euo pipefail
           docker build \
@@ -153,6 +185,7 @@ jobs:
             | tee /tmp/cp5-service-review/service-local-image-id.txt
 
       - name: Retain exact service environment and source-tree evidence
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         run: |
           set -euo pipefail
           docker run --rm workpiece-fdm-authority:service-publication-review \
@@ -228,6 +261,7 @@ jobs:
           PY
 
       - name: Prove production entrypoint remains disabled and service publication unresolved
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         env:
           SOURCE_COMMIT_SHA: ${{ github.sha }}
         run: |
@@ -260,6 +294,7 @@ jobs:
           PY
 
       - name: Generate deterministic service publication-review packet
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         env:
           SOURCE_COMMIT_SHA: ${{ github.sha }}
         run: |
@@ -318,6 +353,7 @@ jobs:
           PY
 
       - name: Upload final service-image review evidence only
+        if: env.SERVICE_REVIEW_STATE == 'unpublished'
         uses: actions/upload-artifact@v4
         with:
           name: cp5-final-service-image-publication-review
@@ -334,5 +370,5 @@ jobs:
           retention-days: 30
 
       - name: Show production review service logs on failure
-        if: failure()
+        if: failure() && env.SERVICE_REVIEW_STATE == 'unpublished'
         run: docker logs workpiece-service-review || true

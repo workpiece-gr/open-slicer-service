@@ -4,6 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 EXPECTED_TOOLCHAIN_DIGEST = "sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739"
+EXPECTED_SERVICE_DIGEST = "sha256:206058fa5d476cd3c4363b7f6b16ff68eda473deef32eef7245d9ba146ca9491"
+EXPECTED_SERVICE_SOURCE = "dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f"
 
 
 def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
@@ -40,13 +42,13 @@ def test_toolchain_recipe_pins_exact_base_and_orca_asset_from_published_lock():
     assert "sha256sum -c -" in recipe
 
 
-def test_final_service_lock_starts_unpublished_and_binds_exact_published_toolchain():
+def test_final_service_lock_is_published_and_binds_exact_published_toolchain():
     service = json.loads((ROOT / "fdm-service.lock.json").read_text(encoding="utf-8"))
     toolchain = json.loads((ROOT / "fdm-toolchain.lock.json").read_text(encoding="utf-8"))
     assert service["schema"] == "workpiece-fdm-authority-service-lock-v1"
-    assert service["status"] == "unpublished"
-    assert service["digest"] is None
-    assert service["source_commit"] is None
+    assert service["status"] == "published"
+    assert service["digest"] == EXPECTED_SERVICE_DIGEST
+    assert service["source_commit"] == EXPECTED_SERVICE_SOURCE
     assert service["image"] == "ghcr.io/workpiece-gr/fdm-authority-service"
     assert service["platform"] == "linux/amd64"
     assert service["build_recipe"] == "Dockerfile.authority"

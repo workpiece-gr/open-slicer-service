@@ -40,6 +40,14 @@ def _unpublished_toolchain_lock_bytes() -> bytes:
     return (json.dumps(value, indent=2) + "\n").encode()
 
 
+def _unpublished_service_lock_bytes() -> bytes:
+    value = json.loads(Path("fdm-service.lock.json").read_text(encoding="utf-8"))
+    value["status"] = "unpublished"
+    value["digest"] = None
+    value["source_commit"] = None
+    return (json.dumps(value, indent=2) + "\n").encode()
+
+
 def _published_service_lock_bytes(source_commit: str = "a" * 40, digest_hex: str = "1" * 64) -> bytes:
     value = json.loads(Path("fdm-service.lock.json").read_text(encoding="utf-8"))
     value["status"] = "published"
@@ -119,9 +127,9 @@ def test_synthetic_unpublished_toolchain_lock_blocks_production_before_pipeline(
         production.build_fdm_authority_production(**values)
 
 
-def test_committed_unpublished_service_lock_blocks_production_even_with_digest_shaped_runtime(monkeypatch, tmp_path: Path):
+def test_synthetic_unpublished_service_lock_blocks_production_even_with_digest_shaped_runtime(monkeypatch, tmp_path: Path):
     values = _kwargs(tmp_path)
-    values["service_lock_bytes"] = Path("fdm-service.lock.json").read_bytes()
+    values["service_lock_bytes"] = _unpublished_service_lock_bytes()
 
     def should_not_run(**_kwargs):
         raise AssertionError("shared pipeline must not run when final service publication is absent")
@@ -224,13 +232,15 @@ def test_production_api_uses_independent_token(monkeypatch):
     assert caught.value.status_code == 401
 
 
-def test_production_health_reports_toolchain_published_but_service_publication_unresolved(monkeypatch, tmp_path: Path):
+def test_production_health_reports_published_service_but_runtime_identity_not_configured(monkeypatch, tmp_path: Path):
     receipt = tmp_path / "qualification.json"
     evidence = tmp_path / "qualification-evidence.bin"
     receipt.write_bytes(b"receipt")
     evidence.write_bytes(b"evidence")
     monkeypatch.setattr(production_api, "FDM_TOOLCHAIN_LOCK", Path("fdm-toolchain.lock.json"))
     monkeypatch.setattr(production_api, "FDM_SERVICE_LOCK", Path("fdm-service.lock.json"))
+    monkeypatch.setattr(production_api, "WORKPIECE_FDM_AUTHORITY_RUNTIME_REF", "")
+    monkeypatch.setattr(production_api, "SERVICE_COMMIT_SHA", "")
     monkeypatch.setattr(production_api, "FDM_MACHINE_QUALIFICATION_RECEIPT", receipt)
     monkeypatch.setattr(production_api, "FDM_MACHINE_QUALIFICATION_EVIDENCE", evidence)
     status = production_api.production_config_status()
@@ -238,6 +248,22 @@ def test_production_health_reports_toolchain_published_but_service_publication_u
     assert status["published_service_runtime"] is False
     assert status["machine_qualification_receipt"] is True
     assert status["machine_qualification_evidence"] is True
+
+
+def test_production_health_accepts_committed_service_only_with_exact_runtime_and_commit(monkeypatch):
+    monkeypatch.setattr(production_api, "FDM_TOOLCHAIN_LOCK", Path("fdm-toolchain.lock.json"))
+    monkeypatch.setattr(production_api, "FDM_SERVICE_LOCK", Path("fdm-service.lock.json"))
+    monkeypatch.setattr(
+        production_api,
+        "WORKPIECE_FDM_AUTHORITY_RUNTIME_REF",
+        "ghcr.io/workpiece-gr/fdm-authority-service@"
+        "sha256:206058fa5d476cd3c4363b7f6b16ff68eda473deef32eef7245d9ba146ca9491",
+    )
+    monkeypatch.setattr(production_api, "SERVICE_COMMIT_SHA", "dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f")
+    assert production_api.production_config_status()["published_service_runtime"] is True
+
+    monkeypatch.setattr(production_api, "SERVICE_COMMIT_SHA", "b" * 40)
+    assert production_api.production_config_status()["published_service_runtime"] is False
 
 
 def test_production_health_requires_exact_service_lock_runtime_and_commit(monkeypatch, tmp_path: Path):
