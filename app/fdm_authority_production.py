@@ -1,11 +1,12 @@
 """Production policy wrapper around the reusable FDM Authority v2 pipeline.
 
-Unlike the candidate wrapper, this module requires both externally-controlled
+Unlike the candidate wrapper, this module requires externally-controlled
 production gates to be complete before the shared CP2->CP7 pipeline may return
 technical production authority:
 
-* CP5 must be backed by the reviewed *published* immutable toolchain lock and a
-  digest-pinned final execution image.
+* CP5 must be backed by the reviewed published immutable toolchain lock.
+* the final service runtime must exactly match a separately reviewed published
+  service-image lock and source commit.
 * the selected physical RatRig/profile combination must have an immutable,
   approved qualification receipt plus the exact retained physical-evidence bytes.
 
@@ -23,6 +24,7 @@ from typing import Any, Mapping
 from .fdm_authority import AUTHORITY_PRODUCTION, evaluate_fdm_authority
 from .fdm_authority_pipeline import FdmAuthorityPipelineError, build_fdm_authority_pipeline
 from .fdm_machine_qualification import FdmMachineQualificationError, validate_machine_qualification_receipt
+from .fdm_service_image import validate_published_service_runtime
 from .fdm_toolchain_provenance import build_toolchain_provenance
 
 FDM_AUTHORITY_PRODUCTION_API_VERSION = "fdm-authority-production/1.0.0"
@@ -81,6 +83,7 @@ def build_fdm_authority_production(
     timeout_seconds: int,
     service_commit: str,
     runtime_image_ref: str,
+    service_lock_bytes: bytes,
     machine_qualification_evidence_id: str,
     toolchain_lock_bytes: bytes,
     toolchain_manifest_bytes: bytes,
@@ -90,13 +93,6 @@ def build_fdm_authority_production(
     machine_qualification_receipt_bytes: bytes | None = None,
     machine_qualification_evidence_bytes: bytes | None = None,
 ) -> FdmAuthorityProductionResult:
-    """Build one production-authoritative RatRig evidence package and price.
-
-    Technical manufacturing authority is required from the shared pipeline.
-    Commercial/order eligibility remains false here because human review is a
-    separate downstream gate owned by Workpiece quote approval.
-    """
-
     qualification_id = machine_qualification_evidence_id.strip() if isinstance(machine_qualification_evidence_id, str) else ""
     if not source_path.is_file() or source_path.stat().st_size < 1:
         raise ValueError("Production FDM authority requires the exact immutable source STL bytes.")
@@ -143,10 +139,13 @@ def build_fdm_authority_production(
         raise ValueError("Configured machine qualification evidence id differs from the immutable qualification receipt.")
     qualification_id = qualification["qualificationId"]
 
-    # This is intentionally evaluated before any CP2/Orca reopen work. The
-    # committed lock must already describe a reviewed, published immutable
-    # toolchain; current repository state is expected to fail here until that
-    # external publication step has genuinely occurred.
+    validate_published_service_runtime(
+        service_lock_bytes=service_lock_bytes,
+        toolchain_lock_bytes=toolchain_lock_bytes,
+        runtime_image_ref=runtime_image_ref,
+        service_commit=service_commit,
+    )
+
     toolchain = build_toolchain_provenance(
         lock_bytes=toolchain_lock_bytes,
         manifest_bytes=toolchain_manifest_bytes,
