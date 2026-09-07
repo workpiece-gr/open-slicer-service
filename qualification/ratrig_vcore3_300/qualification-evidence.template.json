@@ -1,0 +1,69 @@
+{
+  "schema": "workpiece-fdm-qualification-evidence-template-v1",
+  "status": "template_not_evidence",
+  "protocolId": "workpiece-ratrig-vcore3-300-qualification-v1",
+  "printer": {
+    "printerKey": "ratrig_vcore3_300",
+    "machineAssetId": "",
+    "nozzleDiameterMm": null,
+    "bedSurface": "",
+    "firmwareConfigSnapshotSha256": ""
+  },
+  "request": {
+    "material": "pla",
+    "quality": "balanced",
+    "strength": "functional"
+  },
+  "profileSha256": {
+    "machine": "",
+    "process": "",
+    "filament": ""
+  },
+  "runtime": {
+    "sourceCommit": "",
+    "authorityRuntimeRef": "",
+    "toolchainDigest": "",
+    "orcaVersion": "2.4.2"
+  },
+  "materialTrace": {
+    "manufacturer": "",
+    "product": "",
+    "colour": "",
+    "lotOrSpoolId": "",
+    "conditioningNotes": ""
+  },
+  "acceptanceCriteria": {
+    "frozenBeforeRun": false,
+    "dimensionalToleranceMm": null,
+    "holeToleranceMm": null,
+    "repeatabilityRangeMm": null,
+    "timeVariancePercent": null,
+    "materialVariancePercent": null,
+    "visualDefectRules": [],
+    "supportRemovalRules": []
+  },
+  "fixtures": [
+    {
+      "filename": "qualification-dimensions-v1.stl",
+      "sha256": "52f02a382c62e4e659fa7df8df055389f76da89e1265a63fec4ebc6752083bbb",
+      "purpose": "20 mm cube, 100 mm bar and 40 mm tower dimensional checks"
+    },
+    {
+      "filename": "qualification-holes-v1.stl",
+      "sha256": "ce1237ea41ac74feee93b8e4b5c811f2b329de0f816ec238d89e4847b47a74ec",
+      "purpose": "5/10/20 mm nominal internal rings and matching external pins"
+    },
+    {
+      "filename": "qualification-bridge-support-v1.stl",
+      "sha256": "cb4a9639617841e08647c634d62417513d60d39eb12a7a2ff850dcaab261d56a",
+      "purpose": "single-body automatic-support handling of a 40 mm clear span"
+    }
+  ],
+  "runs": [],
+  "review": {
+    "status": "pending",
+    "reviewerId": "",
+    "completedAt": "",
+    "decisionNotes": ""
+  }
+}

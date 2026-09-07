@@ -1,0 +1,28 @@
+{
+  "contractVersion": "fdm-machine-qualification/1.0.0",
+  "productionReady": false,
+  "qualificationId": "",
+  "protocolId": "workpiece-ratrig-vcore3-300-qualification-v1",
+  "printerKey": "ratrig_vcore3_300",
+  "request": {
+    "material": "pla",
+    "quality": "balanced",
+    "strength": "functional"
+  },
+  "profileSha256": {
+    "machine": "",
+    "process": "",
+    "filament": ""
+  },
+  "evidence": {
+    "filename": "qualification-evidence.zip",
+    "mediaType": "application/zip",
+    "bytes": 0,
+    "sha256": ""
+  },
+  "review": {
+    "status": "pending",
+    "reviewerId": "",
+    "completedAt": ""
+  }
+}
