@@ -1,0 +1,330 @@
+name: FDM v2 final service-image publication review
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile.authority"
+      - "requirements.txt"
+      - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
+      - "fdm-service.lock.json"
+      - "app/**"
+      - "profiles/**"
+      - "tests/test_fdm_service_image.py"
+      - "tests/test_fdm_authority_production.py"
+      - ".github/workflows/cp5-service-image-review.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile.authority"
+      - "requirements.txt"
+      - "fdm-toolchain.lock.json"
+      - "fdm-toolchain.publication.json"
+      - "fdm-service.lock.json"
+      - "app/**"
+      - "profiles/**"
+      - "tests/test_fdm_service_image.py"
+      - "tests/test_fdm_authority_production.py"
+      - ".github/workflows/cp5-service-image-review.yml"
+  workflow_dispatch:
+
+# Phase-D review only. It may pull the already-published private toolchain with
+# read permission. It must never push the final service image, update either
+# lock, deploy, configure production, or create physical qualification evidence.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  review-final-service-image:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+
+      - name: Use repository CI Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install review-test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run service-boundary tests
+        run: |
+          PYTHONPATH=. pytest -q \
+            tests/test_fdm_service_image.py \
+            tests/test_fdm_authority_production.py \
+            tests/test_fdm_toolchain_contract.py
+
+      - name: Validate unpublished service lock against published toolchain
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          from app.fdm_service_image import validate_service_lock
+          from app.fdm_toolchain_provenance import validate_toolchain_lock
+
+          toolchain_bytes = Path('fdm-toolchain.lock.json').read_bytes()
+          toolchain = validate_toolchain_lock(toolchain_bytes, require_published=True)
+          service = validate_service_lock(
+              Path('fdm-service.lock.json').read_bytes(),
+              toolchain_lock_bytes=toolchain_bytes,
+              require_published=False,
+          )
+          assert service['status'] == 'unpublished'
+          assert service['digest'] is None
+          assert service['source_commit'] is None
+          assert service['toolchain']['image'] == toolchain['image']
+          assert service['toolchain']['digest'] == toolchain['digest']
+          image_ref = f"{toolchain['image']}@{toolchain['digest']}"
+          Path('/tmp/cp5-toolchain-ref.txt').write_text(image_ref + '\n', encoding='utf-8')
+          print(json.dumps({'toolchainRef': image_ref, 'serviceReviewTarget': service['image']}, indent=2))
+          PY
+          echo "TOOLCHAIN_REF=$(cat /tmp/cp5-toolchain-ref.txt)" >> "$GITHUB_ENV"
+
+      - name: Authenticate to GHCR for read-only toolchain pull
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull exact published toolchain by digest
+        run: |
+          set -euo pipefail
+          docker pull "$TOOLCHAIN_REF"
+          test "$(docker image inspect --format '{{.Architecture}}' "$TOOLCHAIN_REF")" = "amd64"
+
+      - name: Re-verify exact published toolchain bytes
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cp5-service-review/toolchain
+          cid=$(docker create "$TOOLCHAIN_REF")
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/opt/workpiece-toolchain/manifest.json" /tmp/cp5-service-review/toolchain/manifest.json
+          docker cp "$cid:/opt/workpiece-toolchain/packages.txt" /tmp/cp5-service-review/toolchain/packages.txt
+          docker cp "$cid:/opt/orca/squashfs-root/AppRun" /tmp/cp5-service-review/toolchain/orca-AppRun
+          docker rm "$cid"
+          trap - EXIT
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          publication = json.loads(Path('fdm-toolchain.publication.json').read_text(encoding='utf-8'))
+          checks = {
+              '/tmp/cp5-service-review/toolchain/manifest.json': publication['toolchain_manifest_sha256'],
+              '/tmp/cp5-service-review/toolchain/packages.txt': publication['package_inventory_sha256'],
+              '/tmp/cp5-service-review/toolchain/orca-AppRun': publication['orca_runtime_sha256'],
+          }
+          for path, expected in checks.items():
+              actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              assert actual == expected, (path, actual, expected)
+          PY
+
+      - name: Build final service-image candidate on exact published toolchain
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/amd64 \
+            -f Dockerfile.authority \
+            --build-arg TOOLCHAIN_IMAGE="$TOOLCHAIN_REF" \
+            -t workpiece-fdm-authority:service-publication-review \
+            .
+          test "$(docker image inspect --format '{{.Architecture}}' workpiece-fdm-authority:service-publication-review)" = "amd64"
+          docker image inspect --format '{{.Id}}' workpiece-fdm-authority:service-publication-review \
+            | tee /tmp/cp5-service-review/service-local-image-id.txt
+
+      - name: Retain exact service environment and source-tree evidence
+        run: |
+          set -euo pipefail
+          docker run --rm workpiece-fdm-authority:service-publication-review \
+            sh -lc 'python -m pip freeze --all | LC_ALL=C sort' \
+            > /tmp/cp5-service-review/pip-freeze.txt
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          def tree_hash(root: Path) -> str:
+              digest = hashlib.sha256()
+              for path in sorted(item for item in root.rglob('*') if item.is_file()):
+                  relative = path.relative_to(root).as_posix().encode('utf-8')
+                  digest.update(len(relative).to_bytes(8, 'big'))
+                  digest.update(relative)
+                  payload = path.read_bytes()
+                  digest.update(len(payload).to_bytes(8, 'big'))
+                  digest.update(payload)
+              return digest.hexdigest()
+
+          hashes = {
+              'appTreeSha256': tree_hash(Path('app')),
+              'profilesTreeSha256': tree_hash(Path('profiles')),
+              'requirementsSha256': hashlib.sha256(Path('requirements.txt').read_bytes()).hexdigest(),
+              'serviceRecipeSha256': hashlib.sha256(Path('Dockerfile.authority').read_bytes()).hexdigest(),
+          }
+          Path('/tmp/cp5-service-review/source-hashes.json').write_text(
+              json.dumps(hashes, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          PY
+
+          docker run --rm -i workpiece-fdm-authority:service-publication-review python3 - \
+            > /tmp/cp5-service-review/image-source-hashes.json <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          def tree_hash(root: Path) -> str:
+              digest = hashlib.sha256()
+              for path in sorted(item for item in root.rglob('*') if item.is_file()):
+                  relative = path.relative_to(root).as_posix().encode('utf-8')
+                  digest.update(len(relative).to_bytes(8, 'big'))
+                  digest.update(relative)
+                  payload = path.read_bytes()
+                  digest.update(len(payload).to_bytes(8, 'big'))
+                  digest.update(payload)
+              return digest.hexdigest()
+
+          print(json.dumps({
+              'appTreeSha256': tree_hash(Path('/app/app')),
+              'profilesTreeSha256': tree_hash(Path('/app/profiles')),
+              'requirementsSha256': hashlib.sha256(Path('/app/requirements.txt').read_bytes()).hexdigest(),
+              'embeddedToolchainLockSha256': hashlib.sha256(Path('/app/fdm-toolchain.lock.json').read_bytes()).hexdigest(),
+          }, sort_keys=True, indent=2))
+          PY
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          host = json.loads(Path('/tmp/cp5-service-review/source-hashes.json').read_text())
+          image = json.loads(Path('/tmp/cp5-service-review/image-source-hashes.json').read_text())
+          assert image['appTreeSha256'] == host['appTreeSha256']
+          assert image['profilesTreeSha256'] == host['profilesTreeSha256']
+          assert image['requirementsSha256'] == host['requirementsSha256']
+          assert image['embeddedToolchainLockSha256'] == hashlib.sha256(
+              Path('fdm-toolchain.lock.json').read_bytes()
+          ).hexdigest()
+          PY
+
+      - name: Prove production entrypoint remains disabled and service publication unresolved
+        env:
+          SOURCE_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker run -d --name workpiece-service-review -p 8082:8080 \
+            -e SOURCE_COMMIT_SHA="$SOURCE_COMMIT_SHA" \
+            workpiece-fdm-authority:service-publication-review \
+            uvicorn app.authority_production_api:app --host 0.0.0.0 --port 8080 --workers 1
+
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8082/health -o /tmp/cp5-service-review/production-health.json; then
+              break
+            fi
+            sleep 1
+          done
+
+          test -s /tmp/cp5-service-review/production-health.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          health = json.loads(Path('/tmp/cp5-service-review/production-health.json').read_text())
+          assert health['ok'] is False
+          assert health['candidateOnly'] is False
+          assert health['productionEnablementPerformed'] is False
+          assert health['humanReviewStillRequired'] is True
+          assert health['config']['enabled'] is False
+          assert health['config']['published_toolchain_lock'] is True
+          assert health['config']['published_service_runtime'] is False
+          PY
+
+      - name: Generate deterministic service publication-review packet
+        env:
+          SOURCE_COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from app.fdm_service_image import build_service_publication_review_packet
+
+          source_hashes = json.loads(Path('/tmp/cp5-service-review/source-hashes.json').read_text())
+          packet = build_service_publication_review_packet(
+              service_lock_bytes=Path('fdm-service.lock.json').read_bytes(),
+              toolchain_lock_bytes=Path('fdm-toolchain.lock.json').read_bytes(),
+              service_recipe_bytes=Path('Dockerfile.authority').read_bytes(),
+              requirements_bytes=Path('requirements.txt').read_bytes(),
+              app_tree_sha256=source_hashes['appTreeSha256'],
+              profiles_tree_sha256=source_hashes['profilesTreeSha256'],
+              service_commit=os.environ['SOURCE_COMMIT_SHA'],
+              service_local_image_id=Path('/tmp/cp5-service-review/service-local-image-id.txt').read_text(encoding='utf-8'),
+              pip_freeze_bytes=Path('/tmp/cp5-service-review/pip-freeze.txt').read_bytes(),
+          )
+          assert packet['authorityState'] == 'publication_review_candidate'
+          assert packet['authorityCriticalComplete'] is False
+          assert packet['publication']['performed'] is False
+          assert packet['publication']['registryDigest'] is None
+          assert packet['publication']['explicitApprovalRequired'] is True
+          assert packet['production']['productionAuthorityEligible'] is False
+          assert packet['production']['productionEnablementPerformed'] is False
+          assert packet['retainedCandidateEvidence']['localImageIdIsRegistryDigest'] is False
+          Path('/tmp/cp5-service-review/service-publication-review-packet.json').write_text(
+              json.dumps(packet, sort_keys=True, indent=2) + '\n',
+              encoding='utf-8',
+          )
+          print(json.dumps(packet, indent=2))
+          PY
+
+      - name: Prove review workflow has no service registry-write path
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/cp5-service-image-review.yml').read_text(encoding='utf-8').lower()
+          forbidden = [
+              'packages:' + ' write',
+              'docker ' + 'push',
+              '--' + 'push',
+              'gh api --method post',
+              'gh api --method patch',
+              'gh api --method delete',
+          ]
+          for token in forbidden:
+              assert token not in workflow, f'registry-write-capable token present: {token}'
+          PY
+
+      - name: Upload final service-image review evidence only
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp5-final-service-image-publication-review
+          path: |
+            /tmp/cp5-service-review/service-publication-review-packet.json
+            /tmp/cp5-service-review/service-local-image-id.txt
+            /tmp/cp5-service-review/pip-freeze.txt
+            /tmp/cp5-service-review/source-hashes.json
+            /tmp/cp5-service-review/image-source-hashes.json
+            /tmp/cp5-service-review/production-health.json
+            /tmp/cp5-service-review/toolchain/manifest.json
+            /tmp/cp5-service-review/toolchain/packages.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Show production review service logs on failure
+        if: failure()
+        run: docker logs workpiece-service-review || true
