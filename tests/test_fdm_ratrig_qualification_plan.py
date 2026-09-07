@@ -10,7 +10,7 @@ QUALIFICATION_ROOT = ROOT / "qualification" / "ratrig_vcore3_300"
 EXPECTED_FIXTURES = {
     "qualification-dimensions-v1.stl": "52f02a382c62e4e659fa7df8df055389f76da89e1265a63fec4ebc6752083bbb",
     "qualification-holes-v1.stl": "ce1237ea41ac74feee93b8e4b5c811f2b329de0f816ec238d89e4847b47a74ec",
-    "qualification-bridge-support-v1.stl": "db46b42154134ac70861d9a75697fa884433abc95c8bb342b82fbf8071afc176",
+    "qualification-bridge-support-v1.stl": "cb4a9639617841e08647c634d62417513d60d39eb12a7a2ff850dcaab261d56a",
 }
 
 
