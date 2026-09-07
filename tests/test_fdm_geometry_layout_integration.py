@@ -1,5 +1,6 @@
 import math
 import zipfile
+import pytest
 from pathlib import Path
 
 from app.project_builder import inspect_project_3mf, repair_project_plate_layout
@@ -68,3 +69,12 @@ def test_retained_project_preserves_warning_for_tall_non_rod_geometry(tmp_path: 
     assert placement["stability"]["rodLike"] is False
     assert placement["stability"]["code"] == "tall_slender_print"
     assert result["warnings"] == [placement["stability"]["message"]]
+
+
+def test_broad_low_project_fails_closed_without_rewriting_its_geometry(tmp_path: Path):
+    project = tmp_path / "broad.3mf"
+    make_box_project(project, 280, 100, 10)
+    original = project.read_bytes()
+    with pytest.raises(ValueError, match="does not fit"):
+        repair_project_plate_layout(project, envelope_mm=(300, 300, 300))
+    assert project.read_bytes() == original
