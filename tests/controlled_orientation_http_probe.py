@@ -1,5 +1,6 @@
 """Exercise real Orca orientation and fresh-project reopening in Docker CI."""
 import json
+import math
 import struct
 import urllib.error
 import urllib.request
@@ -8,7 +9,16 @@ import urllib.request
 def box(x, y, z):
     points = [(0,0,0),(x,0,0),(x,y,0),(0,y,0),(0,0,z),(x,0,z),(x,y,z),(0,y,z)]
     faces = [(0,2,1),(0,3,2),(4,5,6),(4,6,7),(0,1,5),(0,5,4),(1,2,6),(1,6,5),(2,3,7),(2,7,6),(3,0,4),(3,4,7)]
-    return b'Workpiece controlled orientation CI'.ljust(80,b'\0') + struct.pack('<I',12) + b''.join(struct.pack('<12fH',0,0,0,*points[a],*points[b],*points[c],0) for a,b,c in faces)
+    triangles = []
+    for a,b,c in faces:
+        u = [points[b][i]-points[a][i] for i in range(3)]
+        v = [points[c][i]-points[a][i] for i in range(3)]
+        normal = [u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]]
+        length = math.sqrt(sum(n*n for n in normal))
+        # Real facet normals avoid Orca misclassifying a zero-normal binary
+        # fixture whose coordinate bytes happen to be entirely ASCII-range.
+        triangles.append(struct.pack('<12fH',*[n/length for n in normal],*points[a],*points[b],*points[c],0))
+    return b'Workpiece controlled orientation CI'.ljust(80,b'\0') + struct.pack('<I',12) + b''.join(triangles)
 
 
 failures = []
@@ -36,4 +46,10 @@ for name, dimensions, expected in [
         failures.append(f'{name}: expected {expected}, received {response.status}')
     if response.status == 200 and not result['verification']['reopened_in_fresh_orca_process']:
         failures.append(f'{name}: fresh Orca reopen not verified')
+    if response.status == 200:
+        stability = result['project']['layout_repair']['stability']
+        expected_adjusted = 0 if name == 'normal' else 1
+        expected_diagonal = 1 if name in ('low-rod','long-tall-rod') else 0
+        if stability['adjustedInstanceCount'] != expected_adjusted or stability['diagonalInstanceCount'] != expected_diagonal:
+            failures.append(f'{name}: unexpected controlled orientation evidence')
 assert not failures, '; '.join(failures)
