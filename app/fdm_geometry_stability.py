@@ -192,7 +192,7 @@ def resolve_controlled_orientation(
     # If the selected orientation is already low enough but only misses the
     # usable XY footprint, try exactly +/-45 degrees around Z. We do not give
     # Orca permission to choose arbitrary arranger rotations.
-    if not initial["fits"] and initial_dims[2] <= bed_z + _EPS:
+    if not initial["fits"] and initial_dims[2] <= bed_z + _EPS and rod_like:
         for z_degrees in (45, -45):
             tested.append(candidate(z_degrees=z_degrees))
         fitting = [item for item in tested[1:] if item["fits"]]

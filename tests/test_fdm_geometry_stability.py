@@ -91,3 +91,13 @@ def test_source_diagonal_allowance_is_conservative_and_rod_only():
     assert source_fits_controlled_ratrig_diagonal([20, 20, 290], RATRIG)
     assert source_fits_controlled_ratrig_diagonal([20, 20, 350], RATRIG)
     assert not source_fits_controlled_ratrig_diagonal([20, 200, 320], RATRIG)
+
+
+def test_broad_low_part_cannot_use_diagonal_rod_rescue():
+    values, result = resolve_controlled_orientation(IDENTITY, box_vertices(280, 100, 10), RATRIG)
+    assert result["rodLike"] is False
+    assert values[:9] == IDENTITY[:9]
+    assert result["orientationAdjusted"] is False
+    assert result["diagonal45Applied"] is False
+    assert result["finalFootprintMm"][0] > 276
+    assert result["message"] is None
