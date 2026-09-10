@@ -65,6 +65,9 @@ jobs:
           docker logs workpiece-slicer
           exit 1
 
+      - name: Verify controlled orientation with real Orca
+        run: python tests/controlled_orientation_http_probe.py
+
       - name: Generate integration STL fixtures
         run: |
           python - <<'PY'
