@@ -94,6 +94,8 @@ Use one row per fixture/run/plate as needed.
 
 Fixture: `qualification-dimensions-v1.stl`, quantity 1.
 
+The committed generator defines a 20 × 20 × 20 mm cube, a 100 × 10 × 5 mm bar, and a 10 × 10 × 40 mm tower.
+
 ### Measurements
 
 | Feature | Nominal | Measured | Error | Within frozen criterion? |
@@ -102,7 +104,10 @@ Fixture: `qualification-dimensions-v1.stl`, quantity 1.
 | Cube Y | 20 mm | | | |
 | Cube Z | 20 mm | | | |
 | Bar length | 100 mm | | | |
-| Bar thickness | record from fixture geometry/protocol tooling | | | |
+| Bar width | 10 mm | | | |
+| Bar thickness | 5 mm | | | |
+| Tower X | 10 mm | | | |
+| Tower Y | 10 mm | | | |
 | Tower height | 40 mm | | | |
 
 ### Observations
