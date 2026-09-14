@@ -1,0 +1,226 @@
+name: RatRig physical qualification artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      fixture:
+        description: Canonical qualification fixture
+        required: true
+        type: choice
+        options:
+          - dimensions
+          - holes
+          - bridge-support
+      quantity:
+        description: Physical instance quantity (use 5 only for Q4 repeatability)
+        required: true
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ratrig-physical-qualification
+  cancel-in-progress: false
+
+jobs:
+  build-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+
+      - name: Resolve immutable fixture identity
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.fixture }}" in
+            dimensions)
+              filename=qualification-dimensions-v1.stl
+              expected=52f02a382c62e4e659fa7df8df055389f76da89e1265a63fec4ebc6752083bbb
+              ;;
+            holes)
+              filename=qualification-holes-v1.stl
+              expected=ce1237ea41ac74feee93b8e4b5c811f2b329de0f816ec238d89e4847b47a74ec
+              ;;
+            bridge-support)
+              filename=qualification-bridge-support-v1.stl
+              expected=cb4a9639617841e08647c634d62417513d60d39eb12a7a2ff850dcaab261d56a
+              ;;
+            *) exit 2 ;;
+          esac
+          test "${{ inputs.quantity }}" = "1" || test "${{ inputs.quantity }}" = "5"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+          echo "expected=$expected" >> "$GITHUB_OUTPUT"
+
+      - name: Generate and verify canonical fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/qualification
+          python3 qualification/ratrig_vcore3_300/generate_fixtures.py --output-dir /tmp/qualification
+          fixture=/tmp/qualification/${{ steps.fixture.outputs.filename }}
+          echo "${{ steps.fixture.outputs.expected }}  $fixture" | sha256sum --check --strict
+
+      - name: Build pinned Authority v2 images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.toolchain -t workpiece-fdm-toolchain:qualification .
+          docker build \
+            -f Dockerfile.authority \
+            --build-arg TOOLCHAIN_IMAGE=workpiece-fdm-toolchain:qualification \
+            -t workpiece-fdm-authority:qualification \
+            .
+
+      - name: Start candidate-only Authority v2 service
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain_id=$(docker image inspect --format '{{.Id}}' workpiece-fdm-toolchain:qualification)
+          runtime_id=$(docker image inspect --format '{{.Id}}' workpiece-fdm-authority:qualification)
+          test "${toolchain_id#sha256:}" != "$toolchain_id"
+          test "${runtime_id#sha256:}" != "$runtime_id"
+          echo "TOOLCHAIN_REF=workpiece-fdm-toolchain:qualification@${toolchain_id}" >> "$GITHUB_ENV"
+          echo "RUNTIME_REF=workpiece-fdm-authority:qualification@${runtime_id}" >> "$GITHUB_ENV"
+          docker run -d --name workpiece-ratrig-qualification -p 8081:8080 \
+            -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
+            -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
+            -e ENABLE_FDM_AUTHORITY_V2_API=1 \
+            -e WORKPIECE_FDM_AUTHORITY_V2_TOKEN=ci-qualification-token \
+            -e WORKPIECE_FDM_AUTHORITY_RUNTIME_REF=${RUNTIME_REF} \
+            -e WORKPIECE_FDM_TOOLCHAIN_IMAGE_REF=${TOOLCHAIN_REF} \
+            -e FDM_AUTHORITY_V2_QUEUE_TIMEOUT_SECONDS=30 \
+            workpiece-fdm-authority:qualification \
+            uvicorn app.authority_candidate_api:app --host 0.0.0.0 --port 8080 --workers 1
+
+      - name: Wait for fail-closed candidate service
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8081/health -o /tmp/qualification/health.json; then
+              python3 - <<'PY'
+          import json
+          from pathlib import Path
+          value=json.loads(Path('/tmp/qualification/health.json').read_text())
+          assert value['ok'] is True
+          assert value['candidateOnly'] is True
+          assert value['productionEnablementPerformed'] is False
+          PY
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Generate exact qualification candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --max-time 300 \
+            -H 'Authorization: Bearer ci-qualification-token' \
+            -F file=@/tmp/qualification/${{ steps.fixture.outputs.filename }} \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F quantity=${{ inputs.quantity }} \
+            -F printer=ratrig_vcore3_300 \
+            http://127.0.0.1:8081/v2/authority-candidate \
+            -o /tmp/qualification/response.json
+
+      - name: Extract and independently verify retained package
+        env:
+          EXPECTED_SOURCE_SHA: ${{ steps.fixture.outputs.expected }}
+          FIXTURE_FILENAME: ${{ steps.fixture.outputs.filename }}
+          REQUESTED_QUANTITY: ${{ inputs.quantity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, io, json, os, zipfile
+          from pathlib import Path
+
+          root=Path('/tmp/qualification')
+          payload=json.loads((root/'response.json').read_text())
+          assert payload['contractVersion']=='fdm-authority-candidate/1.0.0'
+          assert payload['candidateOnly'] is True
+          assert payload['authorityState']=='evidence_candidate'
+          assert payload['technicalProductionAuthority'] is False
+          assert payload['productionOrderEligible'] is False
+          assert payload['productionEnablementPerformed'] is False
+          assert payload['humanReview']=={'required':True,'status':'pending'}
+          assert payload['project']['instanceCount']==int(os.environ['REQUESTED_QUANTITY'])
+
+          source=root/os.environ['FIXTURE_FILENAME']
+          assert hashlib.sha256(source.read_bytes()).hexdigest()==os.environ['EXPECTED_SOURCE_SHA']
+
+          bundle=base64.b64decode(payload['bundle']['base64'], validate=True)
+          assert len(bundle)==payload['bundle']['bytes']
+          assert hashlib.sha256(bundle).hexdigest()==payload['bundle']['sha256']
+          bundle_path=root/'authority-v2-candidate-bundle.zip'
+          bundle_path.write_bytes(bundle)
+
+          with zipfile.ZipFile(io.BytesIO(bundle),'r') as archive:
+            names=archive.namelist()
+            assert len(names)==len(set(names))==payload['bundle']['memberCount']
+            assert names[-2:]==['manifest.json','bundle-index.json']
+            assert any(name.endswith('.3mf') for name in names)
+            assert any(name.endswith('.gcode') for name in names)
+            archive.extractall(root/'bundle')
+            index=json.loads(archive.read('bundle-index.json'))
+            for member in index['members']:
+              data=archive.read(member['path'])
+              assert len(data)==member['bytes']
+              assert hashlib.sha256(data).hexdigest()==member['sha256']
+
+          pricing=payload['pricing']
+          report={
+            'schema':'workpiece-ratrig-qualification-candidate-run/1.0.0',
+            'sourceCommit':os.environ['GITHUB_SHA'].lower(),
+            'fixture':os.environ['FIXTURE_FILENAME'],
+            'sourceSha256':os.environ['EXPECTED_SOURCE_SHA'],
+            'request':{'printer':'ratrig_vcore3_300','material':'pla','quality':'balanced','strength':'functional','quantity':int(os.environ['REQUESTED_QUANTITY'])},
+            'authorityState':payload['authorityState'],
+            'authorityIssues':payload['authorityIssues'],
+            'technicalProductionAuthority':False,
+            'productionEnablementPerformed':False,
+            'humanReview':payload['humanReview'],
+            'project':payload['project'],
+            'pricing':pricing,
+            'bundle':{key:payload['bundle'][key] for key in ('sha256','bytes','memberCount')},
+            'runtimeRef':os.environ['RUNTIME_REF'],
+            'toolchainRef':os.environ['TOOLCHAIN_REF'],
+          }
+          (root/'qualification-candidate-report.json').write_text(json.dumps(report,indent=2,sort_keys=True)+'\n')
+          (root/'manifest.json').write_text(json.dumps(payload['manifest'],indent=2,sort_keys=True)+'\n')
+          (root/'pricing.json').write_text(json.dumps(pricing,indent=2,sort_keys=True)+'\n')
+          (root/'response-without-bundle.json').write_text(json.dumps({**payload,'bundle':{key:payload['bundle'][key] for key in ('sha256','bytes','memberCount')}},indent=2,sort_keys=True)+'\n')
+          print(json.dumps(report,indent=2,sort_keys=True))
+          PY
+
+      - name: Upload immutable qualification candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ratrig-${{ inputs.fixture }}-q${{ inputs.quantity }}-${{ github.sha }}
+          path: |
+            /tmp/qualification/${{ steps.fixture.outputs.filename }}
+            /tmp/qualification/authority-v2-candidate-bundle.zip
+            /tmp/qualification/bundle/
+            /tmp/qualification/health.json
+            /tmp/qualification/qualification-candidate-report.json
+            /tmp/qualification/manifest.json
+            /tmp/qualification/pricing.json
+            /tmp/qualification/response-without-bundle.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Show candidate logs on failure
+        if: failure()
+        run: docker logs workpiece-ratrig-qualification || true
