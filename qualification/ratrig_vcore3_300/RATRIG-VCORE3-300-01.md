@@ -99,43 +99,55 @@ manufacturing profile.
 
 ## Initial material lane
 
-The first physical test material is deliberately a non-production test spool:
+The GST3D PLA+ marble spool considered initially was found to be brittle and
+was **not used** for any qualification print.
 
-- Manufacturer/product: GST3D PLA+.
-- Colour: marble (grey with black specks).
-- Lot/spool identifier: not available.
-- Conditioning: not dried before this run.
-- Role: expendable test material for initial qualification exercises.
+The material actually loaded for the initial physical tests is:
 
-This spool can only provide evidence for its exact recorded material state. A
-pass with it must **not** qualify future eSUN material.
+- Manufacturer/product: Fillamentum PLA Extrafill.
+- Colour: black.
+- Remaining quantity at the start of planning: approximately 75 g.
+- Lot/spool identifier: not available; this is a leftover partial spool.
+- Conditioning/drying: not reported; no drying claim is made.
+- Role: limited test material for initial qualification exercises.
+
+This spool can only provide evidence for its exact recorded material state. Its
+limited remaining mass must be checked against the Authority candidate's total
+predicted consumption before each run. A pass with it must **not** qualify
+future eSUN material.
 
 The intended later production PLA is eSUN PLA+ in black or white. Each colour
 and exact production profile must be separately identified and deliberately
 qualified before being represented as production-ready.
 
-## Frozen and pending acceptance information
+## Acceptance information frozen before the first run
 
-Workshop-owner criteria already declared for the first lane:
+The workshop owner accepted and froze these criteria at
+`2026-09-14T08:49:31Z`, before any qualification print:
 
 - External dimensional tolerance: +/-0.2 mm.
 - Internal-hole tolerance: +/-0.3 mm.
 - Five-copy repeatability: maximum measured range 0.1 mm.
+- Predicted-versus-actual print-time variance: +/-15%.
+- Predicted-versus-actual material variance: +/-10%, when actual consumption
+  can be measured reliably.
+- Visual hard failures: layer shift, collision, major warping, unrecovered
+  adhesion failure, sustained under-extrusion, or an aborted print.
+- Support-removal rule: supports must be removable using ordinary hand tools
+  without damaging functional geometry.
 
-The following remain pending and therefore the complete acceptance criteria are
-**not yet frozen**:
+`acceptanceCriteria.frozenBeforeRun` is therefore `true` for these criteria.
+They must not be relaxed after a result is observed. The exact run identity
+fields below still have to be populated before starting Q1:
 
-- predicted-versus-actual time variance;
-- predicted-versus-actual material variance;
-- complete visual-defect pass/fail rules;
-- support-removal pass/fail rules;
 - exact Authority-v2 machine/process/filament profile hashes and runtime;
 - immutable candidate package identity for Q1;
-- UTC time and reviewer identity freezing the criteria.
+- exact retained G-code identity and predicted material/time;
+- reviewer identifier in the working evidence record.
 
-No qualification print should begin until these remaining fields are completed
-and `acceptanceCriteria.frozenBeforeRun` is explicitly set to `true` in the
-working evidence record.
+No qualification print should begin until these identity fields are complete,
+the predicted material fits safely within the approximately 75 g available,
+and the working evidence record carries the same frozen criteria.
 
 ## Change-control note
 
