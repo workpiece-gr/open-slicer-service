@@ -44,6 +44,8 @@ def test_evidence_template_is_explicitly_not_evidence():
     assert template["protocolId"] == "workpiece-ratrig-vcore3-300-qualification-v1"
     assert template["printer"]["printerKey"] == "ratrig_vcore3_300"
     assert template["request"] == {"material": "pla", "quality": "balanced", "strength": "functional"}
+    assert template["profileAmendment"]["status"] == "not_applicable"
+    assert template["profileAmendment"]["doesNotGrantProductionAuthority"] is True
     assert template["acceptanceCriteria"]["frozenBeforeRun"] is False
     assert template["runs"] == []
     assert template["review"]["status"] == "pending"
@@ -68,3 +70,5 @@ def test_qualification_plan_preserves_human_and_exact_combo_gates():
     assert "acceptanceCriteria.frozenBeforeRun" in plan
     assert "The G-code physically printed must be the exact retained G-code" in plan
     assert "every customer order still requires its separate human manufacturing review" in plan
+    assert "Controlled profile amendment and retained evidence" in plan
+    assert "inherited supporting evidence" in plan

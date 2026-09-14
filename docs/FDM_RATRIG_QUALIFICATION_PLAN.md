@@ -77,6 +77,18 @@ For each fixture, generate and retain the exact candidate package for the select
 
 The G-code physically printed must be the exact retained G-code from that candidate package. Do not open the project and re-slice it with changed settings. If any manual production edit is required, that run is not evidence for this exact qualification and must be regenerated/repeated under the revised configuration.
 
+### Controlled profile amendment and retained evidence
+
+An earlier physical run must never be relabeled as having used a later profile hash. A narrow profile amendment may retain a prior passed run as **inherited supporting evidence** only when all of the following are recorded in the canonical evidence JSON:
+
+- the old and new machine/process/filament hashes;
+- the exact changed settings and a technical rationale showing that the change is limited to non-extrusion travel clearance;
+- the immutable identifiers, artifacts, measurements and photos of every inherited run;
+- the new runs required to test the amended behavior; and
+- an explicit human review requirement.
+
+For the RatRig PLA balanced/functional Z-hop amendment, Q1 and Q2 may be retained as inherited supporting evidence only. They remain bound to their original hashes. A regenerated Q3 must demonstrate the amended travel behavior and pass physically; Q4 must then demonstrate revised-profile repeatability and Q5 must pass as the representative functional part. This exception does not create a production receipt, does not waive human review, and does not permit reuse for an extrusion, temperature, flow, geometry, material, firmware, or other profile change.
+
 ## Physical run sequence
 
 ### Q1 — dimensions
@@ -196,4 +208,4 @@ For one successfully reviewed lane:
 7. keep human order review mandatory;
 8. only then consider enabling that exact lane for controlled customer production.
 
-Do not generalize a passing receipt to other materials, quality levels, strength levels, profile hashes, Ender printers, or a changed RatRig configuration.
+Do not generalize a passing receipt to other materials, quality levels, strength levels, profile hashes, Ender printers, or a changed RatRig configuration, except for a human-reviewed controlled profile amendment recorded under the preceding rule.

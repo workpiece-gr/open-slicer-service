@@ -19,6 +19,20 @@
     "process": "",
     "filament": ""
   },
+  "profileAmendment": {
+    "status": "not_applicable",
+    "previousProfileSha256": {
+      "machine": "",
+      "process": "",
+      "filament": ""
+    },
+    "amendedSettings": [],
+    "inheritedRunIds": [],
+    "inheritedEvidenceLimit": "",
+    "requiredNewRunIds": [],
+    "reviewRequired": true,
+    "doesNotGrantProductionAuthority": true
+  },
   "runtime": {
     "sourceCommit": "",
     "authorityRuntimeRef": "",
