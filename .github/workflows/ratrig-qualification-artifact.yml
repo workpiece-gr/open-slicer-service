@@ -87,15 +87,17 @@ jobs:
           runtime_id=$(docker image inspect --format '{{.Id}}' workpiece-fdm-authority:qualification)
           test "${toolchain_id#sha256:}" != "$toolchain_id"
           test "${runtime_id#sha256:}" != "$runtime_id"
-          echo "TOOLCHAIN_REF=workpiece-fdm-toolchain:qualification@${toolchain_id}" >> "$GITHUB_ENV"
-          echo "RUNTIME_REF=workpiece-fdm-authority:qualification@${runtime_id}" >> "$GITHUB_ENV"
+          toolchain_ref=workpiece-fdm-toolchain:qualification@${toolchain_id}
+          runtime_ref=workpiece-fdm-authority:qualification@${runtime_id}
+          echo "TOOLCHAIN_REF=${toolchain_ref}" >> "$GITHUB_ENV"
+          echo "RUNTIME_REF=${runtime_ref}" >> "$GITHUB_ENV"
           docker run -d --name workpiece-ratrig-qualification -p 8081:8080 \
             -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
             -e SOURCE_COMMIT_SHA=${GITHUB_SHA} \
             -e ENABLE_FDM_AUTHORITY_V2_API=1 \
             -e WORKPIECE_FDM_AUTHORITY_V2_TOKEN=ci-qualification-token \
-            -e WORKPIECE_FDM_AUTHORITY_RUNTIME_REF=${RUNTIME_REF} \
-            -e WORKPIECE_FDM_TOOLCHAIN_IMAGE_REF=${TOOLCHAIN_REF} \
+            -e WORKPIECE_FDM_AUTHORITY_RUNTIME_REF=${runtime_ref} \
+            -e WORKPIECE_FDM_TOOLCHAIN_IMAGE_REF=${toolchain_ref} \
             -e FDM_AUTHORITY_V2_QUEUE_TIMEOUT_SECONDS=30 \
             workpiece-fdm-authority:qualification \
             uvicorn app.authority_candidate_api:app --host 0.0.0.0 --port 8080 --workers 1
