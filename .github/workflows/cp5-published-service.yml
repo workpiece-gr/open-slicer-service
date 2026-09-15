@@ -33,7 +33,7 @@ permissions:
   packages: read
 
 env:
-  FROZEN_SOURCE_SHA: a1eaebd3b4564945fc0d9556f5a278923d40e880
+  FROZEN_SOURCE_SHA: d09a8f368099b723d55d43bb0640c9426b1362ac
 
 jobs:
   verify-published-service:
@@ -90,7 +90,7 @@ jobs:
       - name: Check out exact frozen published source separately
         uses: actions/checkout@v4
         with:
-          ref: a1eaebd3b4564945fc0d9556f5a278923d40e880
+          ref: d09a8f368099b723d55d43bb0640c9426b1362ac
           path: frozen-source
           persist-credentials: false
 

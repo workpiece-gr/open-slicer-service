@@ -65,8 +65,8 @@ def test_committed_service_lock_is_published_and_bound_to_published_toolchain():
     toolchain = json.loads(TOOLCHAIN_LOCK_BYTES)
     assert lock["schema"] == FDM_SERVICE_LOCK_SCHEMA
     assert lock["status"] == "published"
-    assert lock["digest"] == "sha256:eff6f54bef3eb231b6bce0cced3398d161810a3451d2c6fd7bc498822281e4cb"
-    assert lock["source_commit"] == "a1eaebd3b4564945fc0d9556f5a278923d40e880"
+    assert lock["digest"] == "sha256:462041d8e8305797aea7042bbdb1682c084994dd4c825fcfe67311c63c873707"
+    assert lock["source_commit"] == "d09a8f368099b723d55d43bb0640c9426b1362ac"
     assert lock["platform"] == "linux/amd64"
     assert lock["build_recipe"] == "Dockerfile.authority"
     assert lock["toolchain"]["image"] == toolchain["image"]
@@ -96,23 +96,23 @@ def test_committed_service_publication_receipt_matches_lock_and_preserves_safety
 def test_committed_published_service_runtime_requires_exact_registry_reference_and_source_commit():
     expected = (
         "ghcr.io/workpiece-gr/fdm-authority-service@"
-        "sha256:eff6f54bef3eb231b6bce0cced3398d161810a3451d2c6fd7bc498822281e4cb"
+        "sha256:462041d8e8305797aea7042bbdb1682c084994dd4c825fcfe67311c63c873707"
     )
     identity = validate_published_service_runtime(
         service_lock_bytes=SERVICE_LOCK_BYTES,
         toolchain_lock_bytes=TOOLCHAIN_LOCK_BYTES,
         runtime_image_ref=expected,
-        service_commit="a1eaebd3b4564945fc0d9556f5a278923d40e880",
+        service_commit="d09a8f368099b723d55d43bb0640c9426b1362ac",
     )
     assert identity["reference"] == expected
-    assert identity["sourceCommit"] == "a1eaebd3b4564945fc0d9556f5a278923d40e880"
+    assert identity["sourceCommit"] == "d09a8f368099b723d55d43bb0640c9426b1362ac"
 
     with pytest.raises(ValueError, match="exactly match"):
         validate_published_service_runtime(
             service_lock_bytes=SERVICE_LOCK_BYTES,
             toolchain_lock_bytes=TOOLCHAIN_LOCK_BYTES,
             runtime_image_ref="workpiece-fdm-authority:candidate@sha256:" + "1" * 64,
-            service_commit="a1eaebd3b4564945fc0d9556f5a278923d40e880",
+            service_commit="d09a8f368099b723d55d43bb0640c9426b1362ac",
         )
     with pytest.raises(ValueError, match="service commit differs"):
         validate_published_service_runtime(
