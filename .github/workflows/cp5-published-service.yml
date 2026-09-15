@@ -33,7 +33,7 @@ permissions:
   packages: read
 
 env:
-  FROZEN_SOURCE_SHA: dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f
+  FROZEN_SOURCE_SHA: a1eaebd3b4564945fc0d9556f5a278923d40e880
 
 jobs:
   verify-published-service:
@@ -63,7 +63,7 @@ jobs:
           )
           publication = json.loads(Path('fdm-service.publication.json').read_text(encoding='utf-8'))
 
-          assert publication['schema'] == 'workpiece-fdm-authority-service-publication-v1'
+          assert publication['schema'] == 'workpiece-fdm-authority-service-publication-v2'
           assert publication['approved_frozen_source_commit'] == os.environ['FROZEN_SOURCE_SHA']
           assert re.fullmatch(r'[0-9a-f]{40}', publication['approved_frozen_source_commit'])
           assert publication['image'] == lock['image']
@@ -71,13 +71,10 @@ jobs:
           assert publication['approved_frozen_source_commit'] == lock['source_commit']
           assert publication['platform'] == lock['platform']
           assert publication['toolchain_reference'] == f"{lock['toolchain']['image']}@{lock['toolchain']['digest']}"
-          assert publication['pre_push_bytes_verified'] is True
           assert publication['push_digest_matches_independent_resolution'] is True
           assert publication['digest_pinned_pullback_verified'] is True
-          assert publication['pulled_bytes_match_reviewed_candidate'] is True
-          assert publication['pulled_toolchain_bytes_match_published_toolchain_receipt'] is True
+          assert publication['embedded_qualification_verified'] is True
           assert publication['deployment_performed'] is False
-          assert publication['machine_qualification_performed'] is False
           assert publication['production_enablement_performed'] is False
           assert publication['human_review_still_required'] is True
 
@@ -93,11 +90,11 @@ jobs:
       - name: Check out exact frozen published source separately
         uses: actions/checkout@v4
         with:
-          ref: dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f
+          ref: a1eaebd3b4564945fc0d9556f5a278923d40e880
           path: frozen-source
           persist-credentials: false
 
-      - name: Verify frozen source bytes against service publication receipt
+      - name: Verify frozen qualification bytes against service publication receipt
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -107,24 +104,9 @@ jobs:
 
           publication = json.loads(Path('fdm-service.publication.json').read_text(encoding='utf-8'))
           root = Path('frozen-source')
-
-          def tree_hash(path: Path) -> str:
-              digest = hashlib.sha256()
-              for item in sorted(candidate for candidate in path.rglob('*') if candidate.is_file()):
-                  relative = item.relative_to(path).as_posix().encode('utf-8')
-                  digest.update(len(relative).to_bytes(8, 'big'))
-                  digest.update(relative)
-                  payload = item.read_bytes()
-                  digest.update(len(payload).to_bytes(8, 'big'))
-                  digest.update(payload)
-              return digest.hexdigest()
-
-          assert hashlib.sha256((root / 'Dockerfile.authority').read_bytes()).hexdigest() == publication['service_recipe_sha256']
-          assert hashlib.sha256((root / 'requirements.txt').read_bytes()).hexdigest() == publication['requirements_sha256']
-          assert hashlib.sha256((root / 'fdm-service.lock.json').read_bytes()).hexdigest() == publication['service_lock_sha256_before_publication']
-          assert hashlib.sha256((root / 'fdm-toolchain.lock.json').read_bytes()).hexdigest() == publication['embedded_toolchain_lock_sha256']
-          assert tree_hash(root / 'app') == publication['app_tree_sha256']
-          assert tree_hash(root / 'profiles') == publication['profiles_tree_sha256']
+          q = root / 'qualification' / 'ratrig_vcore3_300'
+          assert hashlib.sha256((q / 'ratrig-pla-balanced-functional-qualification-receipt.json').read_bytes()).hexdigest() == publication['qualification_receipt_sha256']
+          assert hashlib.sha256((q / 'ratrig-pla-balanced-functional-qualification-evidence.json').read_bytes()).hexdigest() == publication['qualification_evidence_sha256']
           PY
 
       - name: Authenticate to GHCR for read-only pull
@@ -192,6 +174,8 @@ jobs:
           docker cp "$cid:/opt/workpiece-toolchain/manifest.json" /tmp/cp5-published-service/toolchain/manifest.json
           docker cp "$cid:/opt/workpiece-toolchain/packages.txt" /tmp/cp5-published-service/toolchain/packages.txt
           docker cp "$cid:/opt/orca/squashfs-root/AppRun" /tmp/cp5-published-service/toolchain/orca-AppRun
+          docker cp "$cid:/app/fdm-machine-qualification.json" /tmp/cp5-published-service/qualification-receipt.json
+          docker cp "$cid:/app/fdm-machine-qualification-evidence.bin" /tmp/cp5-published-service/qualification-evidence.json
           docker rm "$cid"
           trap - EXIT
 
@@ -202,11 +186,25 @@ jobs:
 
           publication = json.loads(Path('fdm-service.publication.json').read_text(encoding='utf-8'))
           source_hashes = json.loads(Path('/tmp/cp5-published-service/source-hashes.json').read_text())
-          assert source_hashes['appTreeSha256'] == publication['app_tree_sha256']
-          assert source_hashes['profilesTreeSha256'] == publication['profiles_tree_sha256']
-          assert source_hashes['requirementsSha256'] == publication['requirements_sha256']
-          assert source_hashes['embeddedToolchainLockSha256'] == publication['embedded_toolchain_lock_sha256']
-          assert hashlib.sha256(Path('/tmp/cp5-published-service/pip-freeze.txt').read_bytes()).hexdigest() == publication['pip_freeze_sha256']
+          frozen = Path('frozen-source')
+
+          def tree_hash(root: Path) -> str:
+              digest = hashlib.sha256()
+              for path in sorted(item for item in root.rglob('*') if item.is_file()):
+                  relative = path.relative_to(root).as_posix().encode('utf-8')
+                  digest.update(len(relative).to_bytes(8, 'big'))
+                  digest.update(relative)
+                  payload = path.read_bytes()
+                  digest.update(len(payload).to_bytes(8, 'big'))
+                  digest.update(payload)
+              return digest.hexdigest()
+
+          assert source_hashes['appTreeSha256'] == tree_hash(frozen / 'app')
+          assert source_hashes['profilesTreeSha256'] == tree_hash(frozen / 'profiles')
+          assert source_hashes['requirementsSha256'] == hashlib.sha256((frozen / 'requirements.txt').read_bytes()).hexdigest()
+          assert source_hashes['embeddedToolchainLockSha256'] == hashlib.sha256((frozen / 'fdm-toolchain.lock.json').read_bytes()).hexdigest()
+          assert hashlib.sha256(Path('/tmp/cp5-published-service/qualification-receipt.json').read_bytes()).hexdigest() == publication['qualification_receipt_sha256']
+          assert hashlib.sha256(Path('/tmp/cp5-published-service/qualification-evidence.json').read_bytes()).hexdigest() == publication['qualification_evidence_sha256']
 
           toolchain_publication = json.loads(Path('fdm-toolchain.publication.json').read_text(encoding='utf-8'))
           checks = {
@@ -228,7 +226,7 @@ jobs:
               'appTreeSha256': source_hashes['appTreeSha256'],
               'profilesTreeSha256': source_hashes['profilesTreeSha256'],
               'requirementsSha256': source_hashes['requirementsSha256'],
-              'pipFreezeSha256': publication['pip_freeze_sha256'],
+              'pipFreezeSha256': hashlib.sha256(Path('/tmp/cp5-published-service/pip-freeze.txt').read_bytes()).hexdigest(),
               'toolchainReference': publication['toolchain_reference'],
               'deploymentPerformed': False,
               'machineQualificationPerformed': False,

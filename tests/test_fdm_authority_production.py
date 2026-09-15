@@ -257,9 +257,9 @@ def test_production_health_accepts_committed_service_only_with_exact_runtime_and
         production_api,
         "WORKPIECE_FDM_AUTHORITY_RUNTIME_REF",
         "ghcr.io/workpiece-gr/fdm-authority-service@"
-        "sha256:206058fa5d476cd3c4363b7f6b16ff68eda473deef32eef7245d9ba146ca9491",
+        "sha256:eff6f54bef3eb231b6bce0cced3398d161810a3451d2c6fd7bc498822281e4cb",
     )
-    monkeypatch.setattr(production_api, "SERVICE_COMMIT_SHA", "dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f")
+    monkeypatch.setattr(production_api, "SERVICE_COMMIT_SHA", "a1eaebd3b4564945fc0d9556f5a278923d40e880")
     assert production_api.production_config_status()["published_service_runtime"] is True
 
     monkeypatch.setattr(production_api, "SERVICE_COMMIT_SHA", "b" * 40)

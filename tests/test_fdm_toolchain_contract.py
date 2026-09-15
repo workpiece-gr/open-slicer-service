@@ -4,8 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 EXPECTED_TOOLCHAIN_DIGEST = "sha256:3cee4cdf6b09237a77a1bb76226830dc9f363211657511d9d4b1a8edbf744739"
-EXPECTED_SERVICE_DIGEST = "sha256:206058fa5d476cd3c4363b7f6b16ff68eda473deef32eef7245d9ba146ca9491"
-EXPECTED_SERVICE_SOURCE = "dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f"
+EXPECTED_SERVICE_DIGEST = "sha256:eff6f54bef3eb231b6bce0cced3398d161810a3451d2c6fd7bc498822281e4cb"
+EXPECTED_SERVICE_SOURCE = "a1eaebd3b4564945fc0d9556f5a278923d40e880"
 
 
 def test_authority_runtime_is_parallel_to_existing_live_dockerfile():

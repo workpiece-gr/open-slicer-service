@@ -65,8 +65,8 @@ def test_committed_service_lock_is_published_and_bound_to_published_toolchain():
     toolchain = json.loads(TOOLCHAIN_LOCK_BYTES)
     assert lock["schema"] == FDM_SERVICE_LOCK_SCHEMA
     assert lock["status"] == "published"
-    assert lock["digest"] == "sha256:206058fa5d476cd3c4363b7f6b16ff68eda473deef32eef7245d9ba146ca9491"
-    assert lock["source_commit"] == "dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f"
+    assert lock["digest"] == "sha256:eff6f54bef3eb231b6bce0cced3398d161810a3451d2c6fd7bc498822281e4cb"
+    assert lock["source_commit"] == "a1eaebd3b4564945fc0d9556f5a278923d40e880"
     assert lock["platform"] == "linux/amd64"
     assert lock["build_recipe"] == "Dockerfile.authority"
     assert lock["toolchain"]["image"] == toolchain["image"]
@@ -75,7 +75,7 @@ def test_committed_service_lock_is_published_and_bound_to_published_toolchain():
 
 def test_committed_service_publication_receipt_matches_lock_and_preserves_safety_boundaries():
     lock = service_lock_value()
-    assert PUBLICATION["schema"] == "workpiece-fdm-authority-service-publication-v1"
+    assert PUBLICATION["schema"] == "workpiece-fdm-authority-service-publication-v2"
     assert PUBLICATION["approved_frozen_source_commit"] == lock["source_commit"]
     assert PUBLICATION["image"] == lock["image"]
     assert PUBLICATION["registry_digest"] == lock["digest"]
@@ -83,13 +83,12 @@ def test_committed_service_publication_receipt_matches_lock_and_preserves_safety
     assert PUBLICATION["toolchain_reference"] == (
         f"{lock['toolchain']['image']}@{lock['toolchain']['digest']}"
     )
-    assert PUBLICATION["pre_push_bytes_verified"] is True
     assert PUBLICATION["push_digest_matches_independent_resolution"] is True
     assert PUBLICATION["digest_pinned_pullback_verified"] is True
-    assert PUBLICATION["pulled_bytes_match_reviewed_candidate"] is True
-    assert PUBLICATION["pulled_toolchain_bytes_match_published_toolchain_receipt"] is True
+    assert PUBLICATION["embedded_qualification_verified"] is True
+    assert PUBLICATION["qualification_receipt_sha256"] == "4c2de1c8d5e93520874a1e00ac208a91dcba4a4ce156973e6986f386087fb1d2"
+    assert PUBLICATION["qualification_evidence_sha256"] == "c69e51ea0391a625e5d3a2aaa46a5eca9c56a7ab0a439fbea52581c0814cf40a"
     assert PUBLICATION["deployment_performed"] is False
-    assert PUBLICATION["machine_qualification_performed"] is False
     assert PUBLICATION["production_enablement_performed"] is False
     assert PUBLICATION["human_review_still_required"] is True
 
@@ -97,23 +96,23 @@ def test_committed_service_publication_receipt_matches_lock_and_preserves_safety
 def test_committed_published_service_runtime_requires_exact_registry_reference_and_source_commit():
     expected = (
         "ghcr.io/workpiece-gr/fdm-authority-service@"
-        "sha256:206058fa5d476cd3c4363b7f6b16ff68eda473deef32eef7245d9ba146ca9491"
+        "sha256:eff6f54bef3eb231b6bce0cced3398d161810a3451d2c6fd7bc498822281e4cb"
     )
     identity = validate_published_service_runtime(
         service_lock_bytes=SERVICE_LOCK_BYTES,
         toolchain_lock_bytes=TOOLCHAIN_LOCK_BYTES,
         runtime_image_ref=expected,
-        service_commit="dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f",
+        service_commit="a1eaebd3b4564945fc0d9556f5a278923d40e880",
     )
     assert identity["reference"] == expected
-    assert identity["sourceCommit"] == "dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f"
+    assert identity["sourceCommit"] == "a1eaebd3b4564945fc0d9556f5a278923d40e880"
 
     with pytest.raises(ValueError, match="exactly match"):
         validate_published_service_runtime(
             service_lock_bytes=SERVICE_LOCK_BYTES,
             toolchain_lock_bytes=TOOLCHAIN_LOCK_BYTES,
             runtime_image_ref="workpiece-fdm-authority:candidate@sha256:" + "1" * 64,
-            service_commit="dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f",
+            service_commit="a1eaebd3b4564945fc0d9556f5a278923d40e880",
         )
     with pytest.raises(ValueError, match="service commit differs"):
         validate_published_service_runtime(

@@ -2,8 +2,8 @@
   "schema": "workpiece-fdm-authority-service-lock-v1",
   "status": "published",
   "image": "ghcr.io/workpiece-gr/fdm-authority-service",
-  "digest": "sha256:206058fa5d476cd3c4363b7f6b16ff68eda473deef32eef7245d9ba146ca9491",
-  "source_commit": "dce91058be7b306eaeb3b1ab0ab2fbf5c9081f1f",
+  "digest": "sha256:eff6f54bef3eb231b6bce0cced3398d161810a3451d2c6fd7bc498822281e4cb",
+  "source_commit": "a1eaebd3b4564945fc0d9556f5a278923d40e880",
   "platform": "linux/amd64",
   "build_recipe": "Dockerfile.authority",
   "toolchain": {
