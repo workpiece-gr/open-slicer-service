@@ -100,12 +100,15 @@ jobs:
               publication_path = Path('fdm-service.publication.json')
               assert publication_path.is_file(), 'Published service lock requires retained publication receipt.'
               publication = json.loads(publication_path.read_text(encoding='utf-8'))
-              assert publication['schema'] == 'workpiece-fdm-authority-service-publication-v1'
+              assert publication['schema'] == 'workpiece-fdm-authority-service-publication-v2'
               assert publication['image'] == service['image']
               assert publication['registry_digest'] == service['digest']
               assert publication['approved_frozen_source_commit'] == service['source_commit']
+              assert publication['digest_pinned_pullback_verified'] is True
+              assert publication['embedded_qualification_verified'] is True
+              assert publication['qualification_receipt_sha256']
+              assert publication['qualification_evidence_sha256']
               assert publication['deployment_performed'] is False
-              assert publication['machine_qualification_performed'] is False
               assert publication['production_enablement_performed'] is False
               assert publication['human_review_still_required'] is True
 
