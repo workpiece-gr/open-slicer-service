@@ -27,6 +27,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY profiles ./profiles
 COPY fdm-toolchain.lock.json ./fdm-toolchain.lock.json
+COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-receipt.json ./fdm-machine-qualification.json
+COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-evidence.json ./fdm-machine-qualification-evidence.bin
 
 RUN useradd --create-home --uid 10001 slicer \
     && chown -R slicer:slicer /app /opt/venv

@@ -1,14 +1,14 @@
 # Physical machine dossier: RATRIG-VCORE3-300-01
 
-Status: **qualification preparation only**
+Status: **qualified for the controlled generic PLA balanced/functional lane**
 Printer key: `ratrig_vcore3_300`
 Machine asset ID: `RATRIG-VCORE3-300-01`
 Recorded: 2026-09-14
 Source: read-only Moonraker/RatOS inspection plus workshop-owner observations
 
-This record identifies the physical printer intended for the first
-`workpiece-ratrig-vcore3-300-qualification-v1` run. It is not qualification
-evidence and does not make any material/profile lane production-ready.
+This record identifies the physical printer used for the
+`workpiece-ratrig-vcore3-300-qualification-v1` runs. Production authority is
+limited by the separately reviewed canonical receipt and evidence artifact.
 
 ## Machine and motion system
 
@@ -111,14 +111,18 @@ The material actually loaded for the initial physical tests is:
 - Conditioning/drying: not reported; no drying claim is made.
 - Role: limited test material for initial qualification exercises.
 
-This spool can only provide evidence for its exact recorded material state. Its
-limited remaining mass must be checked against the Authority candidate's total
-predicted consumption before each run. A pass with it must **not** qualify
-future eSUN material.
+The physical evidence therefore names Fillamentum PLA Extrafill black exactly.
+After reviewing the completed Q1-Q4 results, the workshop owner explicitly
+accepted this material as representative evidence for the generic `pla` lane.
+That decision does not claim that every PLA brand or colour is identical. Each
+customer job still requires human workshop review of the actual stocked
+material and the lane remains restricted to `balanced` / `functional` on this
+RatRig profile. Other materials, printers, quality levels and strength levels
+remain unqualified.
 
-The intended later production PLA is eSUN PLA+ in black or white. Each colour
-and exact production profile must be separately identified and deliberately
-qualified before being represented as production-ready.
+The intended routine stock is eSUN PLA+ black or white. Its identity must be
+recorded per production job and it must not be described as separately
+physically qualified by these Fillamentum runs.
 
 ## Acceptance information frozen before the first run
 

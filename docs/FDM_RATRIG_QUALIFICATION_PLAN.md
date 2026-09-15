@@ -77,6 +77,16 @@ For each fixture, generate and retain the exact candidate package for the select
 
 The G-code physically printed must be the exact retained G-code from that candidate package. Do not open the project and re-slice it with changed settings. If any manual production edit is required, that run is not evidence for this exact qualification and must be regenerated/repeated under the revised configuration.
 
+### Controlled profile amendment and retained evidence
+
+An earlier physical run must never be relabeled as having used a later profile hash. A narrow profile amendment may retain a prior passed run as **inherited supporting evidence** only when the canonical evidence records the old and new hashes, the exact change, the immutable run identifiers and artifact hashes, the new runs that exercise the amendment, and an explicit human decision.
+
+For the RatRig PLA balanced/functional Z-hop amendment, Q1 and Q2 remain supporting evidence bound to their original hashes. The amended profile is qualified by the physically passed Q3 retry and Q4 five-copy repeatability run. The Q4 printer job ended in a filament-runout cancellation only after all five test objects were complete; that deviation is retained and explicitly accepted rather than rewritten as a fully completed G-code run.
+
+The workshop owner removed Q5 from this lane's acceptance scope after reviewing Q1-Q4. This is recorded as an owner-approved protocol scope change, not a Q5 pass. It does not relax per-order human review or extend the qualification beyond RatRig `pla` / `balanced` / `functional`.
+
+The canonical receipt may bind a compact deterministic JSON evidence index containing exact workflow, source, profile, project, G-code, bundle, measurement and photo hashes. The larger raw candidate packages, G-code and photographs may remain in their retained workflow/local archives. Missing hashes or unavailable referenced evidence fail review closed.
+
 ## Physical run sequence
 
 ### Q1 — dimensions

@@ -1,0 +1,163 @@
+name: Publish reviewed FDM Authority service image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact 40-character main SHA approved for immutable publication
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Validate exact approved main source
+        env:
+          APPROVED_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "${#APPROVED_SHA}" -eq 40
+          test "$APPROVED_SHA" = "$(printf '%s' "$APPROVED_SHA" | tr 'A-F' 'a-f' | grep -E '^[0-9a-f]{40}$')"
+          test "$APPROVED_SHA" = "$(git rev-parse HEAD)"
+
+      - name: Validate qualification receipt and service boundary
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run focused authority tests
+        run: |
+          PYTHONPATH=. pytest -q \
+            tests/test_fdm_ratrig_qualification_plan.py \
+            tests/test_fdm_machine_qualification.py \
+            tests/test_fdm_authority_production.py \
+            tests/test_fdm_service_image.py \
+            tests/test_fdm_toolchain_contract.py
+
+      - name: Resolve exact published toolchain
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          lock = json.loads(Path('fdm-toolchain.lock.json').read_text())
+          assert lock['status'] == 'published'
+          Path('/tmp/toolchain-ref').write_text(f"{lock['image']}@{lock['digest']}\n")
+          PY
+          echo "TOOLCHAIN_REF=$(cat /tmp/toolchain-ref)" >> "$GITHUB_ENV"
+          echo "SERVICE_TAG=authority-v2-${{ inputs.source_sha }}-amd64" >> "$GITHUB_ENV"
+
+      - name: Authenticate to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish exact service image
+        run: |
+          set -euo pipefail
+          docker pull "$TOOLCHAIN_REF"
+          docker buildx build \
+            --platform linux/amd64 \
+            --file Dockerfile.authority \
+            --build-arg TOOLCHAIN_IMAGE="$TOOLCHAIN_REF" \
+            --tag "ghcr.io/workpiece-gr/fdm-authority-service:$SERVICE_TAG" \
+            --push \
+            .
+
+      - name: Resolve, pull back and verify immutable image
+        env:
+          SOURCE_COMMIT_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "ghcr.io/workpiece-gr/fdm-authority-service:$SERVICE_TAG" \
+            | tee /tmp/image-inspect.txt
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          text = Path('/tmp/image-inspect.txt').read_text()
+          match = re.search(r'^Digest:\s+(sha256:[0-9a-f]{64})\s*$', text, re.MULTILINE)
+          assert match, text
+          Path('/tmp/service-digest').write_text(match.group(1) + '\n')
+          PY
+          SERVICE_DIGEST="$(cat /tmp/service-digest)"
+          SERVICE_REF="ghcr.io/workpiece-gr/fdm-authority-service@$SERVICE_DIGEST"
+          docker pull "$SERVICE_REF"
+          test "$(docker image inspect --format '{{.Architecture}}' "$SERVICE_REF")" = "amd64"
+          docker run --rm "$SERVICE_REF" sh -lc \
+            'test -s /app/fdm-machine-qualification.json && test -s /app/fdm-machine-qualification-evidence.bin'
+          docker run --rm -i -e SOURCE_COMMIT_SHA="$SOURCE_COMMIT_SHA" "$SERVICE_REF" python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          from app.fdm_machine_qualification import validate_machine_qualification_receipt
+          from app.main import project_profile_paths
+          import tempfile
+          with tempfile.TemporaryDirectory() as folder:
+              machine, process, filament = project_profile_paths('ratrig_vcore3_300', 'pla', Path(folder), 'balanced', 'functional')
+              hashes = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in (
+                  ('machine', machine), ('process', process), ('filament', filament)
+              )}
+          result = validate_machine_qualification_receipt(
+              receipt_bytes=Path('/app/fdm-machine-qualification.json').read_bytes(),
+              evidence_bytes=Path('/app/fdm-machine-qualification-evidence.bin').read_bytes(),
+              expected_printer_key='ratrig_vcore3_300',
+              expected_request={'material':'pla','quality':'balanced','strength':'functional'},
+              expected_profile_sha256=hashes,
+          )
+          assert result['productionReady'] is True
+          print(json.dumps({'qualificationId': result['qualificationId'], 'profileSha256': result['profileSha256']}))
+          PY
+
+      - name: Retain publication result
+        env:
+          SOURCE_COMMIT_SHA: ${{ inputs.source_sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          digest = Path('/tmp/service-digest').read_text().strip()
+          result = {
+              'schema': 'workpiece-fdm-authority-service-publication-v2',
+              'image': 'ghcr.io/workpiece-gr/fdm-authority-service',
+              'tag': 'authority-v2-' + os.environ['SOURCE_COMMIT_SHA'] + '-amd64',
+              'registry_digest': digest,
+              'approved_frozen_source_commit': os.environ['SOURCE_COMMIT_SHA'],
+              'platform': 'linux/amd64',
+              'toolchain_reference': Path('/tmp/toolchain-ref').read_text().strip(),
+              'qualification_receipt_sha256': hashlib.sha256(Path('qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-receipt.json').read_bytes()).hexdigest(),
+              'qualification_evidence_sha256': hashlib.sha256(Path('qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-evidence.json').read_bytes()).hexdigest(),
+              'digest_pinned_pullback_verified': True,
+              'embedded_qualification_verified': True,
+              'deployment_performed': False,
+              'production_enablement_performed': False,
+              'human_review_still_required': True,
+          }
+          Path('/tmp/fdm-service-publication-v2.json').write_text(json.dumps(result, sort_keys=True, indent=2) + '\n')
+          print(json.dumps({'digest': digest, 'sourceCommit': os.environ['SOURCE_COMMIT_SHA']}))
+          PY
+
+      - name: Upload immutable publication receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: fdm-authority-service-publication-v2-${{ inputs.source_sha }}
+          path: /tmp/fdm-service-publication-v2.json
+          if-no-files-found: error
+          retention-days: 90
