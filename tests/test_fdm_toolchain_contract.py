@@ -15,6 +15,8 @@ def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
     assert "FROM ${TOOLCHAIN_IMAGE}" in authority
     assert "COPY fdm-toolchain.lock.json" in authority
     assert "COPY fdm-service.lock.json" not in authority
+    assert "COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-receipt.json ./fdm-machine-qualification.json" in authority
+    assert "COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-evidence.json ./fdm-machine-qualification-evidence.bin" in authority
     assert "ARG TOOLCHAIN_IMAGE=" not in live
     assert "FROM ubuntu:24.04" in live
 

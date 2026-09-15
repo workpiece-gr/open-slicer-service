@@ -111,7 +111,7 @@
     "2"
   ],
   "z_hop": [
-    "0.4"
+    "0.2"
   ],
   "retract_restart_extra": [
     "0"
@@ -249,7 +249,7 @@
   "purge_in_prime_tower": "1",
   "resonance_avoidance": "0",
   "retract_lift_above": [
-    "50"
+    "15"
   ],
   "retract_lift_below": [
     "0"

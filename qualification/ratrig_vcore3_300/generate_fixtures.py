@@ -99,7 +99,8 @@ class Mesh:
             lines.append("    endloop")
             lines.append("  endfacet")
         lines.append(f"endsolid {self.name}")
-        path.write_text("\n".join(lines) + "\n", encoding="ascii")
+        with path.open("w", encoding="ascii", newline="\n") as output:
+            output.write("\n".join(lines) + "\n")
 
 
 def dimensions_fixture():

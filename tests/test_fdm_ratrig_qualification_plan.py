@@ -4,6 +4,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from app.fdm_machine_qualification import validate_machine_qualification_receipt
+from app.main import build_process_profile
+
 
 ROOT = Path(__file__).parents[1]
 QUALIFICATION_ROOT = ROOT / "qualification" / "ratrig_vcore3_300"
@@ -68,3 +71,41 @@ def test_qualification_plan_preserves_human_and_exact_combo_gates():
     assert "acceptanceCriteria.frozenBeforeRun" in plan
     assert "The G-code physically printed must be the exact retained G-code" in plan
     assert "every customer order still requires its separate human manufacturing review" in plan
+
+
+def test_approved_generic_pla_receipt_binds_canonical_physical_evidence_and_exact_lane(tmp_path):
+    evidence_path = QUALIFICATION_ROOT / "ratrig-pla-balanced-functional-qualification-evidence.json"
+    receipt_path = QUALIFICATION_ROOT / "ratrig-pla-balanced-functional-qualification-receipt.json"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    process_path = tmp_path / "process.json"
+    build_process_profile(
+        ROOT / "profiles" / "process" / "pla.json",
+        "balanced",
+        "functional",
+        process_path,
+        "PLA",
+        automatic_supports=True,
+        project_reopen_safe=True,
+        single_colour_project=True,
+    )
+    runtime_profile_hashes = {
+        "machine": hashlib.sha256((ROOT / "profiles" / "machine.json").read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
+        "process": hashlib.sha256(process_path.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
+        "filament": hashlib.sha256((ROOT / "profiles" / "filament" / "pla.json").read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
+    }
+    assert evidence["qualifiedProfileSha256"] == runtime_profile_hashes
+    assert evidence["scopeChange"]["q5"] == "not_required_owner_approved_scope_change"
+    assert evidence["scopeChange"]["q5Passed"] is False
+    assert any(run["result"] == "hard_failed_nozzle_collision_tower_detached" for run in evidence["runs"])
+    q4 = next(run for run in evidence["runs"] if run["runId"].startswith("Q4-"))
+    assert q4["result"] == "passed_with_documented_post_object_completion_filament_runout"
+    assert q4["measurements"]["rangeMm"] == q4["measurements"]["maximumAllowedRangeMm"] == 0.1
+    validated = validate_machine_qualification_receipt(
+        receipt_bytes=receipt_path.read_bytes(),
+        evidence_bytes=evidence_path.read_bytes(),
+        expected_printer_key="ratrig_vcore3_300",
+        expected_request={"material": "pla", "quality": "balanced", "strength": "functional"},
+        expected_profile_sha256=runtime_profile_hashes,
+    )
+    assert validated["productionReady"] is True
+    assert validated["review"]["status"] == "approved"
