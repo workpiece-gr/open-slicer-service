@@ -51,6 +51,11 @@ jobs:
             tests/test_fdm_service_image.py \
             tests/test_fdm_toolchain_contract.py
 
+      - name: Remove transient Python bytecode before image build
+        run: |
+          find app -type d -name __pycache__ -prune -exec rm -rf {} +
+          find app -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
       - name: Resolve exact published toolchain
         run: |
           set -euo pipefail
