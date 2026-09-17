@@ -24,8 +24,12 @@ def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
     assert toolchain["orca"]["asset"] in live
     assert toolchain["orca"]["asset_sha256"] in live
     assert "sha256sum -c -" in live
-    for overridable in ["ARG BASE_IMAGE", "ARG ORCA_VERSION", "ARG ORCA_ASSET", "ARG ORCA_ASSET_SHA256"]:
-        assert overridable not in live
+    arg_lines = [
+        line.strip()
+        for line in live.splitlines()
+        if line.strip() and line.strip().split(maxsplit=1)[0].upper() == "ARG"
+    ]
+    assert arg_lines == [], f"Legacy Dockerfile must not expose caller-overridable build args: {arg_lines}"
 
 
 def test_toolchain_recipe_pins_exact_base_and_orca_asset_from_published_lock():
