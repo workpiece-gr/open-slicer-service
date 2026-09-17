@@ -19,10 +19,13 @@ def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
     assert "COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-receipt.json ./fdm-machine-qualification.json" in authority
     assert "COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-evidence.json ./fdm-machine-qualification-evidence.bin" in authority
     assert "ARG TOOLCHAIN_IMAGE=" not in live
-    assert "FROM ${BASE_IMAGE}" in live
-    assert toolchain["base_image"]["reference"] in live
+    assert f"FROM {toolchain['base_image']['reference']}" in live
+    assert toolchain["orca"]["version"] in live
+    assert toolchain["orca"]["asset"] in live
     assert toolchain["orca"]["asset_sha256"] in live
     assert "sha256sum -c -" in live
+    for overridable in ["ARG BASE_IMAGE", "ARG ORCA_VERSION", "ARG ORCA_ASSET", "ARG ORCA_ASSET_SHA256"]:
+        assert overridable not in live
 
 
 def test_toolchain_recipe_pins_exact_base_and_orca_asset_from_published_lock():
