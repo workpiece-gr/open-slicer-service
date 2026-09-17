@@ -11,6 +11,7 @@ EXPECTED_SERVICE_SOURCE = "d09a8f368099b723d55d43bb0640c9426b1362ac"
 def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
     live = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     authority = (ROOT / "Dockerfile.authority").read_text(encoding="utf-8")
+    toolchain = json.loads((ROOT / "fdm-toolchain.lock.json").read_text(encoding="utf-8"))
     assert "ARG TOOLCHAIN_IMAGE=workpiece-fdm-toolchain:local" in authority
     assert "FROM ${TOOLCHAIN_IMAGE}" in authority
     assert "COPY fdm-toolchain.lock.json" in authority
@@ -18,7 +19,10 @@ def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
     assert "COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-receipt.json ./fdm-machine-qualification.json" in authority
     assert "COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-evidence.json ./fdm-machine-qualification-evidence.bin" in authority
     assert "ARG TOOLCHAIN_IMAGE=" not in live
-    assert "FROM ubuntu:24.04" in live
+    assert "FROM ${BASE_IMAGE}" in live
+    assert toolchain["base_image"]["reference"] in live
+    assert toolchain["orca"]["asset_sha256"] in live
+    assert "sha256sum -c -" in live
 
 
 def test_toolchain_recipe_pins_exact_base_and_orca_asset_from_published_lock():
