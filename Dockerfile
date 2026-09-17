@@ -1,7 +1,12 @@
-FROM ubuntu:24.04
+ARG BASE_IMAGE=ubuntu:noble-20260810@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
+FROM ${BASE_IMAGE}
 
 ARG ORCA_VERSION=2.4.2
 ARG ORCA_ASSET=OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage
+ARG ORCA_ASSET_SHA256=d12fb8c8eac1aecd2dfb6377acd48f994f8fa439ed5292fa532dd82880f029fd
+
+LABEL workpiece.orcaslicer.version="${ORCA_VERSION}" \
+      workpiece.orcaslicer.asset.sha256="${ORCA_ASSET_SHA256}"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -22,6 +27,7 @@ RUN mkdir -p /opt/orca \
     && curl --fail --location --retry 3 \
       "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v${ORCA_VERSION}/${ORCA_ASSET}" \
       -o /tmp/orca.AppImage \
+    && echo "${ORCA_ASSET_SHA256}  /tmp/orca.AppImage" | sha256sum -c - \
     && chmod +x /tmp/orca.AppImage \
     && cd /opt/orca \
     && /tmp/orca.AppImage --appimage-extract \

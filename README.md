@@ -4,13 +4,14 @@ An isolated HTTP wrapper around OrcaSlicer for manufacturing quotes and toolpath
 
 This repository is intentionally licensed under **GNU AGPL-3.0-or-later**. Keep the exact deployed source public and set `SOURCE_CODE_URL` to that public repository.
 
-## Chosen hosting
+## Deployment paths
 
-- **Source:** a public GitHub repository named `open-slicer-service`
-- **Container host:** Railway, using the included `Dockerfile`
-- **Slicer:** OrcaSlicer 2.4.2, pinned by version and AppImage URL
+- **Source:** this public GitHub repository, with `SOURCE_CODE_URL` pointing to the deployed source for AGPL compliance.
+- **Target host:** the Workpiece-owned Linux server; bind the legacy `/v1/project` container to loopback using the website repository's manufacturing-service runbook.
+- **Legacy provider:** Railway remains an exit/rollback dependency, not the target architecture.
+- **Slicer:** OrcaSlicer 2.4.2, with the base-image digest and downloaded AppImage SHA-256 pinned in `Dockerfile`.
 
-Railway finds a root `Dockerfile` automatically. Use the Hobby plan for the pilot; OrcaSlicer is too large for a dependable 0.5 GB worker.
+The legacy image is separate from the immutable qualified Authority-v2 image. A source rebuild must retain its own image digest; a matching Git commit or label alone does not prove identical runtime bytes.
 
 ## Installed FDM profiles
 
@@ -28,7 +29,7 @@ Validate the resulting G-code in the OrcaSlicer desktop preview and with control
 
 ```bash
 docker build -t open-slicer-service .
-docker run --rm -p 8080:8080 \
+docker run --rm -p 127.0.0.1:8080:8080 \
   -e SOURCE_CODE_URL=https://github.com/workpiece-gr/open-slicer-service \
   -e ALLOWED_ORIGINS=https://workpiece.gr,https://www.workpiece.gr \
   open-slicer-service
@@ -108,7 +109,7 @@ Real OrcaSlicer 2.4.2 Docker acceptance now covers Ender quantity, RatRig routin
 3. Open **Add file → Upload files** and drag in the unzipped project contents. Commit to `main`.
 4. On the repository page, confirm the `LICENSE` is detected as AGPL-3.0.
 
-## Deploy on Railway
+## Legacy Railway deployment (retirement/rollback reference)
 
 1. Sign in at <https://railway.com/> with GitHub.
 2. Choose **New Project → Deploy from GitHub repo** and select `open-slicer-service`.
