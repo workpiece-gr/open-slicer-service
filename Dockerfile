@@ -1,12 +1,12 @@
-FROM ubuntu:24.04
+FROM ubuntu:noble-20260810@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
 
-ARG ORCA_VERSION=2.4.2
-ARG ORCA_ASSET=OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage
+LABEL workpiece.orcaslicer.version="2.4.2" \
+      workpiece.orcaslicer.asset.sha256="d12fb8c8eac1aecd2dfb6377acd48f994f8fa439ed5292fa532dd82880f029fd"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    ORCA_VERSION=${ORCA_VERSION} \
+    ORCA_VERSION=2.4.2 \
     ORCA_BIN=/opt/orca/squashfs-root/AppRun \
     PROFILE_ROOT=/app/profiles \
     PORT=8080
@@ -20,8 +20,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN mkdir -p /opt/orca \
     && curl --fail --location --retry 3 \
-      "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v${ORCA_VERSION}/${ORCA_ASSET}" \
+      "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.4.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.4.2.AppImage" \
       -o /tmp/orca.AppImage \
+    && echo "d12fb8c8eac1aecd2dfb6377acd48f994f8fa439ed5292fa532dd82880f029fd  /tmp/orca.AppImage" | sha256sum -c - \
     && chmod +x /tmp/orca.AppImage \
     && cd /opt/orca \
     && /tmp/orca.AppImage --appimage-extract \
