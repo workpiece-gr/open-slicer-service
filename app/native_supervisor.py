@@ -87,7 +87,7 @@ class NativeSupervisor:
                     self._poisoned = True
                     raise NativeError("NATIVE_CONTAINMENT_FAILED", "Worker cgroup identity differs.")
                 process._native_owned[process.pid] = leader[2]
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 if process.pid in self._processes():
                     self._poisoned = True
                     raise NativeError("NATIVE_CONTAINMENT_FAILED", "Worker identity could not be confirmed.")
@@ -110,7 +110,11 @@ class NativeSupervisor:
                         if self._cgroup(pid) != self._cgroup(os.getpid()):
                             self._poisoned = True
                             raise NativeError("NATIVE_CONTAINMENT_FAILED", "Worker escaped its cgroup.")
-                    except FileNotFoundError:
+                    except (FileNotFoundError, ProcessLookupError):
+                        current = self._processes().get(pid)
+                        if current is not None and current[2] == born:
+                            self._poisoned = True
+                            raise NativeError("NATIVE_CONTAINMENT_FAILED", "Live worker cgroup identity could not be confirmed.")
                         continue
                     if pid not in owned:
                         owned[pid] = born

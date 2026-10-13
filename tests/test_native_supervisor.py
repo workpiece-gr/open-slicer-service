@@ -143,4 +143,21 @@ else:
         self.assertFalse(Path(f"/proc/{self.supervisor.last_execution['pid']}").exists())
         self.assertEqual((await self.run_native('pass')).returncode,0)
 
+
+    async def test_tracking_child_exit_during_cgroup_read(self):
+        parent=os.getpid(); leader=123456; child=123457
+        process=SimpleNamespace(pid=leader,_native_owned={leader:11},_native_baseline=set())
+        snapshots=[{leader:(parent,leader,11),child:(leader,leader,12)}, {leader:(parent,leader,11)}]
+        with patch.object(self.supervisor,'_processes',side_effect=snapshots), patch.object(self.supervisor,'_cgroup',side_effect=lambda pid: (_ for _ in ()).throw(ProcessLookupError()) if pid==child else '0::/test'):
+            self.assertEqual(self.supervisor._track(process),{leader:11})
+        self.assertFalse(self.supervisor.poisoned)
+
+    async def test_tracking_live_unverifiable_child_fails_closed(self):
+        parent=os.getpid();leader=123456;child=123457
+        process=SimpleNamespace(pid=leader,_native_owned={leader:11},_native_baseline=set())
+        snapshot={leader:(parent,leader,11),child:(leader,leader,12)}
+        with patch.object(self.supervisor,'_processes',return_value=snapshot),patch.object(self.supervisor,'_cgroup',side_effect=lambda pid: (_ for _ in ()).throw(ProcessLookupError()) if pid==child else '0::/test'):
+            with self.assertRaises(NativeError):self.supervisor._track(process)
+        self.assertTrue(self.supervisor.poisoned)
+
 if __name__=='__main__': unittest.main()
