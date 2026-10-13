@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager, contextmanager
+import shutil
+
 import base64
 import hashlib
 import json
@@ -11,14 +15,15 @@ import re
 import secrets
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+
+from .native_supervisor import NativeError, NativeSupervisor
 
 from .fdm_geometry_stability import source_fits_controlled_ratrig_diagonal
 from .project_builder import (
@@ -57,7 +62,7 @@ ENABLE_EXPERIMENTAL_PROJECT_API = os.getenv("ENABLE_EXPERIMENTAL_PROJECT_API", "
 WORKPIECE_PROJECT_API_TOKEN = os.getenv("WORKPIECE_PROJECT_API_TOKEN", "").strip()
 PROJECT_QUEUE_TIMEOUT_SECONDS = max(1, int(os.getenv("PROJECT_QUEUE_TIMEOUT_SECONDS", "30")))
 SERVICE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip() or os.getenv("SOURCE_COMMIT_SHA", "").strip()
-PROJECT_GENERATION_LOCK = threading.Lock()
+NATIVE = NativeSupervisor()
 
 MATERIALS = {
     "pla": {
@@ -122,7 +127,64 @@ PROJECT_PRINTERS = {
     },
 }
 
+@asynccontextmanager
+async def lifespan(_app):
+    try:
+        yield
+    finally:
+        await NATIVE.shutdown()
+
+
+@contextmanager
+def native_job(prefix):
+    job = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        yield str(job)
+    finally:
+        # Unverified native containment retains the private output for diagnosis.
+        if not NATIVE.poisoned:
+            try:
+                shutil.rmtree(job)
+            except OSError as error:
+                NATIVE._poisoned = True
+                raise HTTPException(status_code=503, detail="Native job cleanup failed.") from error
+
+
+async def disconnect_guard(request, operation):
+    async def disconnected():
+        while True:
+            message = await request.receive()
+            if message["type"] == "http.disconnect":
+                return
+    work = asyncio.create_task(operation)
+    watch = asyncio.create_task(disconnected()) if request is not None else None
+    try:
+        if watch is None:
+            return await work
+        done, _ = await asyncio.wait((work, watch), return_when=asyncio.FIRST_COMPLETED)
+        if watch in done and not work.done():
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+            if NATIVE.poisoned:
+                raise HTTPException(status_code=503, detail="Native termination could not be confirmed.")
+            raise HTTPException(status_code=499, detail="Native request cancelled.")
+        return await work
+    finally:
+        if watch is not None:
+            watch.cancel()
+        if not work.done():
+            work.cancel()
+        cleanup = asyncio.gather(work, *([watch] if watch is not None else []), return_exceptions=True)
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        await cleanup
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Open Slicer Service",
     version="0.4.0",
     license_info={"name": "GNU AGPL-3.0-or-later", "url": "https://www.gnu.org/licenses/agpl-3.0.html"},
@@ -158,7 +220,7 @@ def ender_generic_profiles_ready() -> bool:
     return all(path.is_file() and path.stat().st_size > 20 for path in paths)
 
 
-def project_access(authorization: Annotated[str | None, Header()] = None):
+async def project_access(authorization: Annotated[str | None, Header()] = None):
     if not ENABLE_EXPERIMENTAL_PROJECT_API:
         raise HTTPException(status_code=404, detail="The project builder is not enabled.")
     if not WORKPIECE_PROJECT_API_TOKEN:
@@ -170,12 +232,12 @@ def project_access(authorization: Annotated[str | None, Header()] = None):
             detail="A valid project-builder service token is required.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not PROJECT_GENERATION_LOCK.acquire(timeout=PROJECT_QUEUE_TIMEOUT_SECONDS):
-        raise HTTPException(status_code=503, detail="The project-builder queue is busy. Retry later.")
     try:
-        yield
-    finally:
-        PROJECT_GENERATION_LOCK.release()
+        async with NATIVE.reservation(PROJECT_QUEUE_TIMEOUT_SECONDS):
+            yield
+    except NativeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
 
 
 @app.get("/")
@@ -193,11 +255,13 @@ def root() -> dict:
 
 @app.get("/health")
 def health() -> dict:
+    if NATIVE.poisoned:
+        raise HTTPException(status_code=503, detail="Native containment requires operator reconciliation.")
     engine_ready = ORCA_BIN.is_file()
     profile_state = profiles_ready()
     source_ready = source_url_is_public()
     return {
-        "ok": engine_ready and profile_state and source_ready,
+        "ok": engine_ready and profile_state and source_ready and not NATIVE.poisoned,
         "engine": f"OrcaSlicer {ORCA_VERSION}",
         "engine_ready": engine_ready,
         "profiles_ready": profile_state,
@@ -425,19 +489,12 @@ def isolated_orca_env(job: Path) -> dict[str, str]:
     }
 
 
-def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+async def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     try:
-        completed = subprocess.run(
-            command,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail=f"OrcaSlicer exceeded {timeout} seconds.") from exc
+        completed = await NATIVE.run(command, cwd=cwd, timeout=timeout, env=env)
+    except NativeError as exc:
+        status = 504 if exc.code == "NATIVE_TIMEOUT" else 503
+        raise HTTPException(status_code=status, detail={"code":exc.code,"message":str(exc)}) from exc
     if completed.returncode != 0:
         if env.get("ORCA_DEBUG_LOGS") == "1":
             print("ORCA DEBUG command:", " ".join(command), flush=True)
@@ -562,6 +619,7 @@ def find_output(directory: Path) -> Path:
 @app.post("/v1/project", response_model=None)
 async def build_project(
     _project_access: Annotated[None, Depends(project_access)],
+    request: Request,
     file: Annotated[UploadFile, File(description="Single-colour STL")],
     material: Annotated[str, Form()] = "pla",
     quality: Annotated[str, Form()] = "balanced",
@@ -587,7 +645,7 @@ async def build_project(
     if not ORCA_BIN.is_file():
         raise HTTPException(status_code=503, detail="The pinned OrcaSlicer binary is not available.")
 
-    with tempfile.TemporaryDirectory(prefix="open-project-") as temporary:
+    with native_job(prefix="open-project-") as temporary:
         job = Path(temporary)
         input_path = job / "source-original.stl"
         upload_size = await save_upload(file, input_path)
@@ -629,7 +687,7 @@ async def build_project(
             # happens after export only when geometry/bed fit requires it.
             allow_arrange_rotations=selected_printer != "ratrig_vcore3_300",
         )
-        run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
+        await disconnect_guard(request, run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
         if not project_path.is_file():
             candidates = sorted(job.rglob("*.3mf"), key=lambda item: item.stat().st_size, reverse=True)
             if not candidates:
@@ -676,7 +734,7 @@ async def build_project(
             verification_dir = job / "verify"
             verification_dir.mkdir()
             verify_command = verify_project_command(orca_bin=ORCA_BIN, project_path=project_path, output_dir=verification_dir)
-            run_orca(verify_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
+            await disconnect_guard(request, run_orca(verify_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
             gcode_files = find_outputs(verification_dir)
             if not gcode_files:
                 raise HTTPException(status_code=422, detail="The exported project could not be reopened and sliced by a fresh Orca process.")
@@ -835,6 +893,7 @@ async def build_project(
 
 @app.post("/v1/slice")
 async def slice_model(
+    request: Request,
     file: Annotated[UploadFile, File(description="Single-colour STL")],
     material: Annotated[str, Form()] = "pla",
     quality: Annotated[str, Form()] = "balanced",
@@ -873,7 +932,7 @@ async def slice_model(
             raise HTTPException(status_code=503, detail="The pinned OrcaSlicer Ender 3 generic profiles for the requested material are not available.")
 
     material_profile = MATERIALS[material]
-    with tempfile.TemporaryDirectory(prefix="open-slice-") as temporary:
+    with native_job(prefix="open-slice-") as temporary:
         job = Path(temporary)
         input_path = job / "input.stl"
         output_dir = job / "output"
@@ -924,22 +983,13 @@ async def slice_model(
             str(input_path),
         ])
         try:
-            completed = subprocess.run(
-                command,
-                cwd=job,
-                capture_output=True,
-                text=True,
-                timeout=SLICE_TIMEOUT_SECONDS,
-                check=False,
-                env={
-                    **os.environ,
-                    "XDG_CONFIG_HOME": str(xdg_config),
-                    "XDG_CACHE_HOME": str(xdg_cache),
-                    "XDG_DATA_HOME": str(xdg_data),
-                },
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise HTTPException(status_code=504, detail=f"Slicing exceeded {SLICE_TIMEOUT_SECONDS} seconds.") from exc
+            async with NATIVE.reservation(PROJECT_QUEUE_TIMEOUT_SECONDS):
+                completed = await disconnect_guard(request, NATIVE.run(command, cwd=job,
+                    timeout=SLICE_TIMEOUT_SECONDS, env={**os.environ,
+                        "XDG_CONFIG_HOME":str(xdg_config),"XDG_CACHE_HOME":str(xdg_cache),"XDG_DATA_HOME":str(xdg_data)}))
+        except NativeError as exc:
+            raise HTTPException(status_code=504 if exc.code == "NATIVE_TIMEOUT" else 503,
+                detail={"code":exc.code,"message":str(exc)}) from exc
 
         result_path = output_dir / "result.json"
         engine_result = None
