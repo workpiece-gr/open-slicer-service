@@ -23,6 +23,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from .api_guard import ApiGuard, GuardLimits, bounded_setting
 from .native_supervisor import NativeError, NativeSupervisor
 
 from .fdm_geometry_stability import source_fits_controlled_ratrig_diagonal
@@ -52,7 +53,8 @@ ORCA_VERSION = os.getenv("ORCA_VERSION", "2.4.2")
 ORCA_BIN = Path(os.getenv("ORCA_BIN", "/opt/orca/squashfs-root/AppRun"))
 PROFILE_ROOT = Path(os.getenv("PROFILE_ROOT", "/app/profiles"))
 SOURCE_CODE_URL = os.getenv("SOURCE_CODE_URL", "")
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+MAX_UPLOAD_BYTES = bounded_setting("MAX_UPLOAD_BYTES",50*1024*1024,84,50*1024*1024,integer=True)
+MAX_STL_TRIANGLES = bounded_setting("MAX_STL_TRIANGLES",1_000_000,1,1_000_000,integer=True)
 SLICE_TIMEOUT_SECONDS = int(os.getenv("SLICE_TIMEOUT_SECONDS", "180"))
 MAX_PREVIEW_MOVES = int(os.getenv("MAX_PREVIEW_MOVES", "30000"))
 MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
@@ -200,6 +202,10 @@ app.add_middleware(
 )
 
 
+app.add_middleware(ApiGuard,token_getter=lambda:WORKPIECE_PROJECT_API_TOKEN,
+    limits=GuardLimits.from_environment(MAX_UPLOAD_BYTES), unavailable_getter=lambda:NATIVE.poisoned)
+
+
 def source_url_is_public() -> bool:
     parsed = urlparse(SOURCE_CODE_URL)
     return parsed.scheme == "https" and parsed.netloc != "" and "YOUR-NAME" not in SOURCE_CODE_URL
@@ -253,6 +259,13 @@ def root() -> dict:
     }
 
 
+@app.get("/healthz")
+def healthz() -> dict:
+    if NATIVE.poisoned or not WORKPIECE_PROJECT_API_TOKEN or not ORCA_BIN.is_file() or not profiles_ready() or not source_url_is_public():
+        raise HTTPException(status_code=503,detail={"code":"SERVICE_NOT_READY"})
+    return {"ok":True}
+
+
 @app.get("/health")
 def health() -> dict:
     if NATIVE.poisoned:
@@ -266,6 +279,7 @@ def health() -> dict:
         "engine_ready": engine_ready,
         "profiles_ready": profile_state,
         "source_ready": source_ready,
+        "slice_authenticated": bool(WORKPIECE_PROJECT_API_TOKEN),
         "profile_files": {name: path.is_file() for name, path in PROFILE_FILES.items()},
         "project_3mf": {
             "experimental": True,
@@ -650,7 +664,7 @@ async def build_project(
         input_path = job / "source-original.stl"
         upload_size = await save_upload(file, input_path)
         try:
-            inspection = inspect_stl(input_path)
+            inspection = inspect_stl(input_path,max_triangles=MAX_STL_TRIANGLES,max_line_bytes=4096)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -938,6 +952,10 @@ async def slice_model(
         output_dir = job / "output"
         output_dir.mkdir()
         upload_size = await save_upload(file, input_path)
+        try:
+            inspect_stl(input_path,max_triangles=MAX_STL_TRIANGLES,max_line_bytes=4096)
+        except ValueError as error:
+            raise HTTPException(status_code=400,detail=str(error)) from error
         process_path = job / "process.json"
         if printer == "ratrig_vcore3_300":
             machine_path = PROFILE_FILES["machine"]
