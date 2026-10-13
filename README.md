@@ -166,3 +166,72 @@ Unverified containment poisons readiness and further admission and retains the
 private job directory for diagnosis; it never publishes partial output or kills
 unrelated processes. Container-local temporary storage bounds captured logs;
 only their final 1 MiB is read into Python memory.
+
+## Legacy API admission and upload protection
+
+All `/v1/*` routes and detailed `/health` require the existing
+`WORKPIECE_PROJECT_API_TOKEN` bearer credential. An outer ASGI gate checks that
+credential before receiving the body or invoking multipart parsing. The website
+must use the same protected service credential for both slicing and project
+creation. Public `/healthz` returns only readiness (`ok`); the AGPL `/source` offer
+and root information remain public. Detailed health remains available to
+credentialed operators without waiting for manufacturing admission.
+
+The service uses fixed, service-global limits, independent of client IP or
+forwarding headers. Defaults are one active complete request (upload, parsing,
+native work and response), two queued requests and a 30-second maximum queue
+wait. This supplements the unchanged one-native-workload supervisor. Invalid
+credentials receive 401; after a global 40-attempt burst, authentication failures
+receive 429 (120 attempts/minute refill). Missing service credentials fail 503.
+
+Authorized manufacturing admission defaults to 60 requests/minute with a burst
+of 30, and 256 MiB/minute of actual incoming body bytes with a 128 MiB burst.
+Multipart body size is at most the upload ceiling plus 1 MiB of overhead (51 MiB
+at the default 50 MiB STL ceiling). Declared and actual lengths are both checked.
+A complete body must arrive within 15 seconds, without resetting its deadline
+per chunk. Duplicate/ambiguous body framing is rejected. Bodies are first spooled
+into private automatically closed temporary files before multipart parsing, so
+failed/oversized/disconnected uploads cannot leave parser-created upload files.
+This temporarily requires up to twice the body size while the parser runs; the
+existing 1 GiB container `/tmp` cap remains the hard storage boundary.
+
+Bounded environment controls are `FDM_MAX_PENDING_REQUESTS` (0–4),
+`FDM_ADMISSION_TIMEOUT_SECONDS` (1–30), `FDM_BODY_TIMEOUT_SECONDS` (1–30),
+`FDM_REQUESTS_PER_MINUTE` (1–120), `FDM_REQUEST_BURST` (1–60),
+`FDM_BYTES_PER_MINUTE` (1–512 MiB) and `FDM_BYTE_BURST` (1–256 MiB).
+Invalid, nonfinite and excessive settings fail startup. `MAX_UPLOAD_BYTES` may be
+reduced but cannot exceed 50 MiB. `MAX_STL_TRIANGLES` defaults to 1,000,000 and may
+only be reduced; both native routes inspect STL geometry within that cap. ASCII
+STL lines are limited to 4096 bytes and must decode as UTF-8. Geometry bounds and
+profile/provenance algorithms remain unchanged for valid files within the caps.
+
+Application failures use structured error codes: 429 for exhausted global
+budgets/full queue, 503 for queue expiry or unavailable configuration/storage,
+413 for body size, 408 for the body deadline and 499 for upload disconnect.
+Capacity and private body files are released on every confirmed response,
+rejection or cancellation. Native containment failures remain fail closed.
+
+These limits are deliberately **single-process**: deploy the reviewed single
+Uvicorn worker. Multiple replicas/workers would require separately reviewed
+shared admission accounting. Authentication does not confer manufacturing
+qualification; mandatory workshop review and nonauthoritative pricing remain.
+
+Before FastAPI allocates multipart upload files, the pinned `python-multipart`
+parser performs a no-file preflight over the bounded spool: at most one file
+named `file`, 16 form fields, 8 KiB per part's headers, 8 KiB per field value,
+a 200-byte boundary and a 255-byte filename. File bytes retain the configured
+STL upload ceiling. Truncated/malformed forms and alternate URL-encoded form
+bodies are rejected. The preflight itself has a finite five-second inspection
+budget. Rejections request connection closure so unread rejected bodies cannot
+occupy persistent connections. Existing transport connection/keep-alive bounds
+must be configured by the reviewed launcher; this application limiter is not a
+replacement for transport admission control.
+
+Protected manufacturing responses have an absolute 15-second transfer deadline
+starting with response headers; it is never reset for later chunks.
+`FDM_RESPONSE_TIMEOUT_SECONDS` may be set only within 1–30 seconds. A stalled
+partial response raises a connection-closing error rather than sending a second
+status or pretending an incomplete artifact succeeded. Admission is released
+only after application cancellation/finally cleanup has finished. A request that
+waited in the queue also rechecks native containment readiness before consuming
+its upload body.
