@@ -148,3 +148,21 @@ The API never sends a job to a printer. Uploaded models live only in a per-reque
 - Preserve upstream copyright and licence notices.
 
 This is practical implementation guidance, not legal advice. Have counsel review the final boundary between this AGPL service and any proprietary site code before launch.
+
+## Native process lifecycle
+
+Slice, project export and fresh-project verification execute in isolated native
+sessions under one shared compile reservation. Each native stage retains the
+existing 180-second execution ceiling; the project reservation remains held
+across export, validation and verification. Queue admission remains bounded by
+`PROJECT_QUEUE_TIMEOUT_SECONDS` (30 seconds by default).
+
+Linux subreaper support, PID start-time identities, pidfds and matching container
+cgroup membership protect descendant termination. Timeout or request cancellation
+sends TERM to verified owned processes, then escalates after one second and reaps
+children. Successful parent exit also triggers descendant cleanup before artifact
+acceptance. Native subprocesses do not receive the service authentication token.
+Unverified containment poisons readiness and further admission and retains the
+private job directory for diagnosis; it never publishes partial output or kills
+unrelated processes. Container-local temporary storage bounds captured logs;
+only their final 1 MiB is read into Python memory.
