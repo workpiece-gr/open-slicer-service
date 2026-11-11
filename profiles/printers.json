@@ -1,0 +1,35 @@
+{
+  "schema": "workpiece-fdm-printers/1",
+  "routing": {
+    "rule": "smallest_capable",
+    "tie_break": ["envelope_volume_asc", "key_asc"],
+    "note": "Quote (/v1/slice) and project (/v1/project) route through the same rule so a quoted part and its delivered project land on the same printer. Printer choice is internal to the workshop; the website never shows it to customers."
+  },
+  "printers": {
+    "ratrig_vcore3_300": {
+      "label": "RatRig V-Core 3 300 / 0.4 mm",
+      "enabled": true,
+      "calibrated": true,
+      "temporary_generic": false,
+      "envelope_mm": [300.0, 300.0, 300.0],
+      "fit_rule": "controlled_ratrig_diagonal",
+      "materials": ["pla", "petg", "pctg", "abs", "tpu"],
+      "profile_source": "workpiece_profiles",
+      "arrange_rotations": false,
+      "layout_repair": true
+    },
+    "ender3_generic_235": {
+      "label": "Ender 3 generic / 0.4 mm (temporary)",
+      "enabled": false,
+      "calibrated": false,
+      "temporary_generic": true,
+      "envelope_mm": [235.0, 235.0, 235.0],
+      "fit_rule": "axis_permutation",
+      "materials": ["pla", "petg", "abs", "tpu"],
+      "profile_source": "orca_bundled_creality_generic",
+      "arrange_rotations": true,
+      "layout_repair": false,
+      "note": "Real future workshop printer. Present but disabled: its profile is OrcaSlicer's bundled generic Creality Ender-3 preset with only the envelope overridden and is not calibrated. The service refuses to start if a printer is enabled without calibrated=true, so this profile can never produce a live quote or project until the owner supplies a calibrated profile set and flips both flags. Confirm the real Z height (235 vs 250 mm) before enabling."
+    }
+  }
+}

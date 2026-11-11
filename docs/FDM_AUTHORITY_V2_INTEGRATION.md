@@ -22,7 +22,7 @@ The route is intentionally unavailable unless all of the following are configure
 
 - `ENABLE_FDM_AUTHORITY_V2_API=1`;
 - independent server-to-server bearer token `WORKPIECE_FDM_AUTHORITY_V2_TOKEN`;
-- exact 40-hex service source commit through the existing `SOURCE_COMMIT_SHA` / `RAILWAY_GIT_COMMIT_SHA` provenance input;
+- exact 40-hex service source commit through the existing `SOURCE_COMMIT_SHA` provenance input;
 - `WORKPIECE_FDM_AUTHORITY_RUNTIME_REF` as a content-addressed `...@sha256:<64 hex>` execution-image reference;
 - `WORKPIECE_FDM_TOOLCHAIN_IMAGE_REF` as a content-addressed `...@sha256:<64 hex>` candidate toolchain reference;
 - the CP5 toolchain lock, toolchain manifest, package inventory, exact Orca runtime and RatRig profiles.
