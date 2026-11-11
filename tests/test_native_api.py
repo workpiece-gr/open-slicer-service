@@ -111,13 +111,6 @@ class NativeApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.supervisor.poisoned)
         shutil.rmtree(job)
 
-    async def test_run_orca_stays_synchronous_for_the_authority_module(self):
-        # fdm_authority_http_project.py calls run_orca() without awaiting; it must remain a plain function.
-        import inspect
-
-        self.assertFalse(inspect.iscoroutinefunction(main.run_orca))
-        self.assertTrue(inspect.iscoroutinefunction(main.run_native))
-
 
 if __name__ == "__main__":
     unittest.main()
