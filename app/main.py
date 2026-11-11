@@ -20,10 +20,9 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Respons
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
-from .fdm_geometry_stability import source_fits_controlled_ratrig_diagonal
+from .printers import AUTO, PrinterConfigError, PrinterRegistry, RoutingDecision, RoutingError, load_registry, route_printer
 from .project_builder import (
     build_project_command,
-    fits_axis_permutation,
     inspect_project_3mf,
     inspect_stl,
     repair_project_plate_layout,
@@ -54,10 +53,21 @@ MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
 MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
 ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
 ENABLE_EXPERIMENTAL_PROJECT_API = os.getenv("ENABLE_EXPERIMENTAL_PROJECT_API", "0").strip().lower() in {"1", "true", "yes"}
+# One server-to-server bearer token protects every slicing endpoint (/v1/slice,
+# /v1/project, /v1/printers). The Workpiece website sends it as WORKPIECE_FDM_SLICER_TOKEN.
 WORKPIECE_PROJECT_API_TOKEN = os.getenv("WORKPIECE_PROJECT_API_TOKEN", "").strip()
-PROJECT_QUEUE_TIMEOUT_SECONDS = max(1, int(os.getenv("PROJECT_QUEUE_TIMEOUT_SECONDS", "30")))
-SERVICE_COMMIT_SHA = os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip() or os.getenv("SOURCE_COMMIT_SHA", "").strip()
-PROJECT_GENERATION_LOCK = threading.Lock()
+# One OrcaSlicer subprocess at a time, shared by quoting and project generation.
+# Failure mode this prevents: concurrent Orca runs exceeding the container memory
+# cgroup and being killed mid-slice for every caller. PROJECT_QUEUE_TIMEOUT_SECONDS
+# is the older name of the same wait limit and is still honoured.
+QUEUE_TIMEOUT_SECONDS = max(1, int(os.getenv("QUEUE_TIMEOUT_SECONDS", os.getenv("PROJECT_QUEUE_TIMEOUT_SECONDS", "30"))))
+PROJECT_QUEUE_TIMEOUT_SECONDS = QUEUE_TIMEOUT_SECONDS
+SERVICE_COMMIT_SHA = os.getenv("SOURCE_COMMIT_SHA", "").strip()
+ORCA_LOCK = threading.Lock()
+PROJECT_GENERATION_LOCK = ORCA_LOCK
+_QUEUE_STATE_LOCK = threading.Lock()
+_QUEUE_STATE = {"waiting": 0}
+PREVIEW_MODES = ("moves", "none")
 
 MATERIALS = {
     "pla": {
@@ -107,20 +117,38 @@ ENDER_GENERIC_FILAMENT_BASES = {
     "abs": ENDER_GENERIC_ROOT / "filament" / "fdm_filament_abs.json",
     "tpu": ENDER_GENERIC_ROOT / "filament" / "fdm_filament_tpu.json",
 }
-PROJECT_PRINTERS = {
-    "ratrig_vcore3_300": {
-        "label": "RatRig V-Core 3 300 / 0.4 mm",
-        "envelope_mm": (300.0, 300.0, 300.0),
-        "temporary_generic": False,
-        "materials": tuple(MATERIALS.keys()),
-    },
-    "ender3_generic_235": {
-        "label": "Ender 3 generic / 0.4 mm (temporary)",
-        "envelope_mm": (235.0, 235.0, 235.0),
-        "temporary_generic": True,
-        "materials": tuple(ENDER_GENERIC_FILAMENTS.keys()),
-    },
-}
+REPOSITORY_PROFILE_ROOT = Path(__file__).resolve().parents[1] / "profiles"
+
+
+def resolve_printers_file() -> Path:
+    configured = os.getenv("PRINTERS_FILE", "").strip()
+    if configured:
+        return Path(configured)
+    deployed = PROFILE_ROOT / "printers.json"
+    if deployed.is_file():
+        return deployed
+    return REPOSITORY_PROFILE_ROOT / "printers.json"
+
+
+def load_printers(path: Path | None = None) -> PrinterRegistry:
+    registry = load_registry(path or resolve_printers_file())
+    for printer in registry.printers.values():
+        unknown = sorted(set(printer.materials) - set(MATERIALS))
+        if unknown:
+            raise PrinterConfigError(f"printers.{printer.key}.materials names unknown materials: {', '.join(unknown)}.")
+        if printer.profile_source == "orca_bundled_creality_generic":
+            unsupported = sorted(set(printer.materials) - set(ENDER_GENERIC_FILAMENTS))
+            if unsupported:
+                raise PrinterConfigError(f"printers.{printer.key}.materials has no bundled Creality filament for: {', '.join(unsupported)}.")
+    return registry
+
+
+# The configured printer list. The RatRig is enabled; the Ender 3 is present but
+# disabled and uncalibrated. load_printers() raises at import time for an enabled
+# printer without a calibrated profile, so the service refuses to start rather than
+# quote from an unmeasured profile.
+PRINTERS = load_printers()
+PROJECT_PRINTERS = PRINTERS.legacy_table()
 
 app = FastAPI(
     title="Open Slicer Service",
@@ -134,8 +162,17 @@ app.add_middleware(
     allow_origins=origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+
+def api_error(status_code: int, code: str, detail: str, *, headers: dict[str, str] | None = None, **extra) -> HTTPException:
+    """Every refusal carries a stable machine-readable ``code`` beside its human text."""
+    return HTTPException(status_code=status_code, detail={"code": code, "detail": detail, **extra}, headers=headers)
+
+
+def routing_error(exc: RoutingError) -> HTTPException:
+    return api_error(422, exc.code, exc.detail)
 
 
 def source_url_is_public() -> bool:
@@ -158,24 +195,60 @@ def ender_generic_profiles_ready() -> bool:
     return all(path.is_file() and path.stat().st_size > 20 for path in paths)
 
 
-def project_access(authorization: Annotated[str | None, Header()] = None):
-    if not ENABLE_EXPERIMENTAL_PROJECT_API:
-        raise HTTPException(status_code=404, detail="The project builder is not enabled.")
+def require_service_token(authorization: str | None) -> None:
     if not WORKPIECE_PROJECT_API_TOKEN:
-        raise HTTPException(status_code=503, detail="The project builder service token is not configured.")
+        raise api_error(503, "TOKEN_NOT_CONFIGURED", "The slicer service token (WORKPIECE_PROJECT_API_TOKEN) is not configured.")
     scheme, _, supplied = (authorization or "").partition(" ")
     if scheme.lower() != "bearer" or not supplied or not secrets.compare_digest(supplied.strip(), WORKPIECE_PROJECT_API_TOKEN):
-        raise HTTPException(
-            status_code=401,
-            detail="A valid project-builder service token is required.",
-            headers={"WWW-Authenticate": "Bearer"},
+        raise api_error(401, "UNAUTHORIZED", "A valid slicer service bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
+
+
+def _acquire_orca_slot() -> None:
+    with _QUEUE_STATE_LOCK:
+        _QUEUE_STATE["waiting"] += 1
+    try:
+        acquired = ORCA_LOCK.acquire(timeout=QUEUE_TIMEOUT_SECONDS)
+    finally:
+        with _QUEUE_STATE_LOCK:
+            _QUEUE_STATE["waiting"] -= 1
+    if not acquired:
+        raise api_error(
+            503,
+            "BUSY",
+            f"The slicer is busy with another job and no slot opened within {QUEUE_TIMEOUT_SECONDS} seconds. Retry later.",
+            retry_after_seconds=QUEUE_TIMEOUT_SECONDS,
         )
-    if not PROJECT_GENERATION_LOCK.acquire(timeout=PROJECT_QUEUE_TIMEOUT_SECONDS):
-        raise HTTPException(status_code=503, detail="The project-builder queue is busy. Retry later.")
+
+
+def queue_status() -> dict:
+    with _QUEUE_STATE_LOCK:
+        waiting = _QUEUE_STATE["waiting"]
+    return {"busy": ORCA_LOCK.locked(), "waiting": waiting, "timeout_seconds": QUEUE_TIMEOUT_SECONDS, "concurrency": 1}
+
+
+def slice_access(authorization: Annotated[str | None, Header()] = None):
+    """Token, then the single Orca slot. Used by /v1/slice."""
+    require_service_token(authorization)
+    _acquire_orca_slot()
     try:
         yield
     finally:
-        PROJECT_GENERATION_LOCK.release()
+        ORCA_LOCK.release()
+
+
+def project_access(authorization: Annotated[str | None, Header()] = None):
+    if not ENABLE_EXPERIMENTAL_PROJECT_API:
+        raise api_error(404, "PROJECT_DISABLED", "The project builder is not enabled.")
+    require_service_token(authorization)
+    _acquire_orca_slot()
+    try:
+        yield
+    finally:
+        ORCA_LOCK.release()
+
+
+def printers_access(authorization: Annotated[str | None, Header()] = None) -> None:
+    require_service_token(authorization)
 
 
 @app.get("/")
@@ -203,17 +276,32 @@ def health() -> dict:
         "profiles_ready": profile_state,
         "source_ready": source_ready,
         "profile_files": {name: path.is_file() for name, path in PROFILE_FILES.items()},
+        "service_commit": SERVICE_COMMIT_SHA or None,
+        # The website readiness check (server/readiness/manufacturing-services.mjs)
+        # requires this exact top-level key.
+        "slice_authenticated": bool(WORKPIECE_PROJECT_API_TOKEN),
+        "slice_api": {"authenticated": bool(WORKPIECE_PROJECT_API_TOKEN)},
+        "queue": queue_status(),
+        "printers": PRINTERS.public()["printers"],
+        "routing": PRINTERS.public()["routing"],
         "project_3mf": {
             "experimental": True,
             "enabled": ENABLE_EXPERIMENTAL_PROJECT_API,
             "authenticated": bool(WORKPIECE_PROJECT_API_TOKEN),
             "concurrency": 1,
             "concurrency_scope": "single service process; deploy one replica until a distributed queue exists",
-            "queue_timeout_seconds": PROJECT_QUEUE_TIMEOUT_SECONDS,
+            "queue_timeout_seconds": QUEUE_TIMEOUT_SECONDS,
             "ender_generic_profiles_ready": ender_generic_profiles_ready(),
-            "printers": {key: {"label": value["label"], "envelope_mm": value["envelope_mm"], "temporary_generic": value["temporary_generic"]} for key, value in PROJECT_PRINTERS.items()},
+            "printers": {key: {"label": value["label"], "envelope_mm": value["envelope_mm"], "temporary_generic": value["temporary_generic"], "enabled": value["enabled"], "calibrated": value["calibrated"]} for key, value in PROJECT_PRINTERS.items()},
         },
     }
+
+
+@app.get("/v1/printers")
+def list_printers(_access: Annotated[None, Depends(printers_access)]) -> dict:
+    """The configured printer list without file paths. Internal: the website validates
+    the ``printer.key`` a slice or project reports against it; customers never see it."""
+    return PRINTERS.public()
 
 
 @app.get("/source", response_class=RedirectResponse)
@@ -284,10 +372,10 @@ async def save_upload(upload: UploadFile, destination: Path) -> int:
         while chunk := await upload.read(1024 * 1024):
             size += len(chunk)
             if size > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail=f"STL exceeds the {MAX_UPLOAD_BYTES} byte upload limit.")
+                raise api_error(413, "UPLOAD_TOO_LARGE", f"STL exceeds the {MAX_UPLOAD_BYTES} byte upload limit.")
             output.write(chunk)
     if size < 84:
-        raise HTTPException(status_code=400, detail="The uploaded STL is empty or incomplete.")
+        raise api_error(400, "UPLOAD_EMPTY", "The uploaded STL is empty or incomplete.")
     return size
 
 
@@ -322,7 +410,7 @@ def build_ender_generic_machine(destination: Path) -> dict:
 
 def build_ender_generic_filament(material: str, destination: Path) -> dict:
     if material not in ENDER_GENERIC_FILAMENTS:
-        raise HTTPException(status_code=422, detail=f"The temporary Ender 3 profile does not support {material.upper()}.")
+        raise api_error(422, "MATERIAL_UNSUPPORTED", f"The temporary Ender 3 profile does not support {material.upper()}.")
     paths = [
         ENDER_GENERIC_FILAMENT_COMMON,
         ENDER_GENERIC_FILAMENT_BASES[material],
@@ -344,34 +432,37 @@ def build_ender_generic_filament(material: str, destination: Path) -> dict:
     return merged
 
 
-def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
-    if printer == "ratrig_vcore3_300":
+def printer_profile_sources(printer: str, material: str, job: Path) -> tuple[Path, Path, Path]:
+    """Machine profile path, process base profile path and filament profile path for one printer."""
+    record = PROJECT_PRINTERS.get(printer)
+    if record is None:
+        raise api_error(422, "PRINTER_UNKNOWN", f"Unknown printer: {printer}")
+    if record["profile_source"] == "workpiece_profiles":
         if not profiles_ready():
-            raise HTTPException(status_code=503, detail="Validated RatRig profiles are not installed.")
+            missing = [name for name, path in PROFILE_FILES.items() if not path.is_file()]
+            raise api_error(503, "PROFILES_MISSING", f"Validated RatRig profiles are not installed: {', '.join(missing)}")
         material_profile = MATERIALS[material]
-        machine_path = PROFILE_FILES["machine"]
-        process_base = material_profile["process"]
-        filament_path = material_profile["filament"]
-    elif printer == "ender3_generic_235":
-        if material not in ENDER_GENERIC_FILAMENTS:
-            raise HTTPException(status_code=422, detail=f"The temporary Ender 3 profile does not yet support {material.upper()}.")
-        required = (
-            ENDER_GENERIC_MACHINE,
-            ENDER_GENERIC_PROCESS,
-            ENDER_GENERIC_FILAMENT_COMMON,
-            ENDER_GENERIC_FILAMENT_BASES[material],
-            ENDER_GENERIC_FILAMENTS[material],
-        )
-        missing = [path for path in required if not path.is_file()]
-        if missing:
-            raise HTTPException(status_code=503, detail="The pinned OrcaSlicer Ender 3 generic profiles are not available.")
-        machine_path = job / "ender3-machine.json"
-        build_ender_generic_machine(machine_path)
-        process_base = ENDER_GENERIC_PROCESS
-        filament_path = job / "ender3-filament.json"
-        build_ender_generic_filament(material, filament_path)
-    else:
-        raise HTTPException(status_code=422, detail=f"Unknown project printer: {printer}")
+        return PROFILE_FILES["machine"], material_profile["process"], material_profile["filament"]
+    if material not in ENDER_GENERIC_FILAMENTS:
+        raise api_error(422, "MATERIAL_UNSUPPORTED", f"The temporary Ender 3 profile does not yet support {material.upper()}.")
+    required = (
+        ENDER_GENERIC_MACHINE,
+        ENDER_GENERIC_PROCESS,
+        ENDER_GENERIC_FILAMENT_COMMON,
+        ENDER_GENERIC_FILAMENT_BASES[material],
+        ENDER_GENERIC_FILAMENTS[material],
+    )
+    if any(not path.is_file() or path.stat().st_size <= 20 for path in required):
+        raise api_error(503, "PROFILES_MISSING", "The pinned OrcaSlicer Ender 3 generic profiles are not available.")
+    machine_path = job / "ender3-machine.json"
+    build_ender_generic_machine(machine_path)
+    filament_path = job / "ender3-filament.json"
+    build_ender_generic_filament(material, filament_path)
+    return machine_path, ENDER_GENERIC_PROCESS, filament_path
+
+
+def project_profile_paths(printer: str, material: str, job: Path, quality: str, strength: str) -> tuple[Path, Path, Path]:
+    machine_path, process_base, filament_path = printer_profile_sources(printer, material, job)
 
     process_path = job / "project-process.json"
     material_label = MATERIALS[material]["label"] if material in MATERIALS else material.upper()
@@ -388,28 +479,31 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
     return machine_path, process_path, filament_path
 
 
+def route(requested: str, material: str, dimensions_mm: list[float]) -> RoutingDecision:
+    """The one routing rule for quotes and projects; refusals carry a code."""
+    try:
+        return route_printer(PRINTERS, requested, material, dimensions_mm)
+    except RoutingError as exc:
+        raise routing_error(exc) from exc
+
+
 def choose_project_printer(requested: str, material: str, dimensions_mm: list[float]) -> str:
-    if requested != "auto":
-        if requested not in PROJECT_PRINTERS:
-            raise HTTPException(status_code=422, detail=f"printer must be auto or one of: {', '.join(PROJECT_PRINTERS)}")
-        profile = PROJECT_PRINTERS[requested]
-        if material not in profile["materials"]:
-            raise HTTPException(status_code=422, detail=f"{material.upper()} is not supported by {requested}.")
-        fits = (
-            source_fits_controlled_ratrig_diagonal(dimensions_mm, profile["envelope_mm"])
-            if requested == "ratrig_vcore3_300"
-            else fits_axis_permutation(dimensions_mm, profile["envelope_mm"])
-        )
-        if not fits:
-            raise HTTPException(status_code=422, detail=f"The STL does not fit the configured {requested} envelope, including the controlled RatRig diagonal check where applicable.")
-        return requested
-    ender = PROJECT_PRINTERS["ender3_generic_235"]
-    if material in ender["materials"] and fits_axis_permutation(dimensions_mm, ender["envelope_mm"]):
-        return "ender3_generic_235"
-    ratrig = PROJECT_PRINTERS["ratrig_vcore3_300"]
-    if source_fits_controlled_ratrig_diagonal(dimensions_mm, ratrig["envelope_mm"]):
-        return "ratrig_vcore3_300"
-    raise HTTPException(status_code=422, detail="The STL exceeds both configured Workpiece FDM envelopes, including the controlled RatRig 45-degree rod-fit check.")
+    """Compatibility wrapper returning only the selected printer key."""
+    return route(requested, material, dimensions_mm).printer.key
+
+
+def printer_payload(decision: RoutingDecision) -> dict:
+    printer = decision.printer
+    return {
+        "key": printer.key,
+        "label": printer.label,
+        "envelope_mm": list(printer.envelope_mm),
+        "temporary_generic": printer.temporary_generic,
+        "enabled": printer.enabled,
+        "calibrated": printer.calibrated,
+        "selection": decision.selection,
+        "candidates": list(decision.candidates),
+    }
 
 
 def isolated_orca_env(job: Path) -> dict[str, str]:
@@ -437,7 +531,7 @@ def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail=f"OrcaSlicer exceeded {timeout} seconds.") from exc
+        raise api_error(504, "SLICE_TIMEOUT", f"OrcaSlicer exceeded {timeout} seconds.") from exc
     if completed.returncode != 0:
         if env.get("ORCA_DEBUG_LOGS") == "1":
             print("ORCA DEBUG command:", " ".join(command), flush=True)
@@ -451,7 +545,7 @@ def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]
                         print("ORCA DEBUG result.json:", result_file.read_text(encoding="utf-8", errors="ignore")[-8000:], flush=True)
                 except Exception as debug_exc:
                     print("ORCA DEBUG output inspection failed:", repr(debug_exc), flush=True)
-        raise HTTPException(status_code=422, detail="OrcaSlicer could not build or verify the requested project.")
+        raise api_error(422, "SLICE_FAILED", "OrcaSlicer could not build or verify the requested project.")
     return completed
 
 
@@ -489,7 +583,8 @@ def parse_gcode_summary(path: Path) -> dict:
     return summary
 
 
-def _iter_extrusions(path: Path):
+def _iter_extrusion_segments(path: Path):
+    """Yield (x, y, nx, ny, nz, feature, extruded_mm) for every extruding XY move."""
     x = y = z = e = 0.0
     xyz_absolute = True
     e_absolute = True
@@ -525,8 +620,46 @@ def _iter_extrusions(path: Path):
             nz = values.get("Z", z) if xyz_absolute else z + values.get("Z", 0.0)
             ne = values.get("E", e) if e_absolute else e + values.get("E", 0.0)
             if ne > e + 1e-7 and (nx != x or ny != y):
-                yield (x, y, nx, ny, nz, feature)
+                yield (x, y, nx, ny, nz, feature, ne - e)
             x, y, z, e = nx, ny, nz, ne
+
+
+def _iter_extrusions(path: Path):
+    for x, y, nx, ny, nz, feature, _extruded in _iter_extrusion_segments(path):
+        yield (x, y, nx, ny, nz, feature)
+
+
+SUPPORT_FEATURE_RE = re.compile(r"support", re.IGNORECASE)
+
+
+def analyse_extrusions(path: Path) -> dict:
+    """One pass over the G-code: move count and extruded filament length per Orca feature role."""
+    count = 0
+    by_feature: dict[str, float] = {}
+    for _x, _y, _nx, _ny, _nz, feature, extruded in _iter_extrusion_segments(path):
+        count += 1
+        by_feature[feature] = by_feature.get(feature, 0.0) + extruded
+    total = sum(by_feature.values())
+    support = sum(value for feature, value in by_feature.items() if SUPPORT_FEATURE_RE.search(feature))
+    return {
+        "total_extrusion_moves": count,
+        "extruded_mm_by_feature": {feature: round(value, 3) for feature, value in sorted(by_feature.items())},
+        "total_extruded_mm": round(total, 3),
+        "support_extruded_mm": round(support, 3),
+        "support_fraction": (support / total) if total > 0 else 0.0,
+    }
+
+
+def support_summary(analysis: dict, filament_grams: float | None) -> dict:
+    """Support material from exact extrusion roles, not from whether supports were enabled."""
+    fraction = float(analysis["support_fraction"])
+    used = analysis["support_extruded_mm"] > 0
+    grams = round(float(filament_grams) * fraction, 3) if filament_grams is not None else None
+    return {"supports_used": used, "support_grams": grams, "support_fraction": round(fraction, 6)}
+
+
+def empty_toolpath(total_extrusion_moves: int) -> dict:
+    return {"features": [], "moves": [], "bounds": None, "total_extrusion_moves": total_extrusion_moves, "sample_stride": 0}
 
 
 def sample_toolpath(path: Path, limit: int) -> dict:
@@ -572,20 +705,20 @@ async def build_project(
     response_mode: Annotated[str, Form()] = "json",
 ) -> dict | Response:
     if material not in MATERIALS:
-        raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
+        raise api_error(422, "INVALID_PARAMETER", f"material must be one of: {', '.join(MATERIALS)}")
     if quality not in QUALITY:
-        raise HTTPException(status_code=422, detail=f"quality must be one of: {', '.join(QUALITY)}")
+        raise api_error(422, "INVALID_PARAMETER", f"quality must be one of: {', '.join(QUALITY)}")
     if strength not in STRENGTH:
-        raise HTTPException(status_code=422, detail=f"strength must be one of: {', '.join(STRENGTH)}")
+        raise api_error(422, "INVALID_PARAMETER", f"strength must be one of: {', '.join(STRENGTH)}")
     if quantity < 1 or quantity > MAX_PROJECT_QUANTITY:
-        raise HTTPException(status_code=422, detail=f"quantity must be between 1 and {MAX_PROJECT_QUANTITY}")
+        raise api_error(422, "INVALID_PARAMETER", f"quantity must be between 1 and {MAX_PROJECT_QUANTITY}")
     if response_mode not in {"json", "binary"}:
-        raise HTTPException(status_code=422, detail="response_mode must be json or binary")
+        raise api_error(422, "INVALID_PARAMETER", "response_mode must be json or binary")
     filename = file.filename or "upload.stl"
     if Path(filename).suffix.lower() != ".stl":
-        raise HTTPException(status_code=415, detail="The experimental project builder accepts STL files only.")
+        raise api_error(415, "UNSUPPORTED_MEDIA", "The experimental project builder accepts STL files only.")
     if not ORCA_BIN.is_file():
-        raise HTTPException(status_code=503, detail="The pinned OrcaSlicer binary is not available.")
+        raise api_error(503, "ENGINE_MISSING", "The pinned OrcaSlicer binary is not available.")
 
     with tempfile.TemporaryDirectory(prefix="open-project-") as temporary:
         job = Path(temporary)
@@ -594,9 +727,11 @@ async def build_project(
         try:
             inspection = inspect_stl(input_path)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise api_error(400, "SOURCE_INVALID", str(exc)) from exc
 
-        selected_printer = choose_project_printer(printer, material, inspection["dimensions_mm"])
+        decision = route(printer, material, inspection["dimensions_mm"])
+        selected_printer = decision.printer.key
+        printer_record = PROJECT_PRINTERS[selected_printer]
         machine_path, process_path, filament_path = project_profile_paths(selected_printer, material, job, quality, strength)
         project_path = job / "workpiece-production.3mf"
         env = isolated_orca_env(job)
@@ -627,39 +762,40 @@ async def build_project(
             # 2.4.2 CLI has produced wasteful 45-degree placement for long
             # rectangular parts here. Controlled +/-45-degree rescue now
             # happens after export only when geometry/bed fit requires it.
-            allow_arrange_rotations=selected_printer != "ratrig_vcore3_300",
+            allow_arrange_rotations=bool(printer_record["arrange_rotations"]),
         )
         run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
         if not project_path.is_file():
             candidates = sorted(job.rglob("*.3mf"), key=lambda item: item.stat().st_size, reverse=True)
             if not candidates:
-                raise HTTPException(status_code=422, detail="OrcaSlicer completed without exporting an editable project 3MF.")
+                raise api_error(422, "SLICE_FAILED", "OrcaSlicer completed without exporting an editable project 3MF.")
             project_path = candidates[0]
 
         layout_repair = None
-        if selected_printer == "ratrig_vcore3_300":
+        if printer_record["layout_repair"]:
             try:
                 layout_repair = repair_project_plate_layout(
                     project_path,
-                    envelope_mm=PROJECT_PRINTERS[selected_printer]["envelope_mm"],
+                    envelope_mm=printer_record["envelope_mm"],
                 )
             except ValueError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+                raise api_error(422, "SLICE_FAILED", str(exc)) from exc
 
         project_bytes = project_path.stat().st_size
         if project_bytes <= 0 or project_bytes > MAX_PROJECT_BYTES:
-            raise HTTPException(status_code=422, detail="The generated project 3MF is outside the supported size limit.")
+            raise api_error(422, "PROJECT_TOO_LARGE", "The generated project 3MF is outside the supported size limit.")
         try:
             project_inspection = inspect_project_3mf(project_path)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise api_error(422, "PROJECT_INVALID", str(exc)) from exc
         if project_inspection["instance_count"] != quantity:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Orca project quantity verification failed: expected {quantity}, found {project_inspection['instance_count']}.",
+            raise api_error(
+                422,
+                "PROJECT_INVALID",
+                f"Orca project quantity verification failed: expected {quantity}, found {project_inspection['instance_count']}.",
             )
         if not project_inspection["embedded"]["project_settings"]:
-            raise HTTPException(status_code=422, detail="The exported 3MF did not embed project settings.")
+            raise api_error(422, "PROJECT_INVALID", "The exported 3MF did not embed project settings.")
 
         if os.getenv("ORCA_DEBUG_LOGS") == "1":
             print("ORCA DEBUG project inspection:", json.dumps(project_inspection, separators=(",", ":")), flush=True)
@@ -679,7 +815,7 @@ async def build_project(
             run_orca(verify_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
             gcode_files = find_outputs(verification_dir)
             if not gcode_files:
-                raise HTTPException(status_code=422, detail="The exported project could not be reopened and sliced by a fresh Orca process.")
+                raise api_error(422, "SLICE_FAILED", "The exported project could not be reopened and sliced by a fresh Orca process.")
 
             plates = []
             total_time = 0
@@ -698,7 +834,7 @@ async def build_project(
                                         break
                         print("ORCA DEBUG incomplete summary:", summary, flush=True)
                         print("ORCA DEBUG summary lines:\n" + "\n".join(interesting), flush=True)
-                    raise HTTPException(status_code=422, detail="Fresh-project verification produced incomplete slice statistics.")
+                    raise api_error(422, "SLICE_FAILED", "Fresh-project verification produced incomplete slice statistics.")
                 total_time += int(summary["print_time_seconds"])
                 total_filament += float(summary["filament_grams"])
                 plates.append(
@@ -718,11 +854,21 @@ async def build_project(
                 "total_filament_grams": round(total_filament, 3),
             }
 
-        profile = PROJECT_PRINTERS[selected_printer]
         geometry_messages = []
         if layout_repair:
             geometry_messages.extend(layout_repair.get("warnings") or [])
             geometry_messages.extend(layout_repair.get("notices") or [])
+        project_warnings = [
+            *geometry_messages,
+            "Experimental CP2b: the editable project 3MF must be manually opened in OrcaSlicer desktop before production use.",
+        ]
+        if printer_record["temporary_generic"]:
+            project_warnings.append(
+                "The Ender 3 profile is a temporary Orca-derived generic profile with a Workpiece 235 x 235 x 235 mm envelope override; replace it with measured machine profiles."
+            )
+        project_warnings.append(
+            "Automatic orientation, arrangement and supports require acceptance testing with representative Workpiece models before manufacturing authority."
+        )
         payload = {
             "experimental": True,
             "engine": {
@@ -737,20 +883,14 @@ async def build_project(
                 "sha256": sha256_file(input_path),
                 "inspection": inspection,
             },
-            "printer": {
-                "key": selected_printer,
-                "label": profile["label"],
-                "envelope_mm": profile["envelope_mm"],
-                "temporary_generic": profile["temporary_generic"],
-                "selection": "automatic_smallest_capable" if printer == "auto" else "requested",
-            },
+            "printer": printer_payload(decision),
             "request": {
                 "material": material,
                 "quality": quality,
                 "strength": strength,
                 "quantity": quantity,
                 "supports": "automatic",
-                "orientation": "orca_auto_plus_controlled_stability_rescue" if selected_printer == "ratrig_vcore3_300" else "orca_auto",
+                "orientation": "orca_auto_plus_controlled_stability_rescue" if printer_record["layout_repair"] else "orca_auto",
                 "arrangement": "orca_auto",
                 "verification_requested": verify,
                 "response_mode": response_mode,
@@ -778,12 +918,7 @@ async def build_project(
                 "layout_repair": layout_repair,
             },
             "verification": verification,
-            "warnings": [
-                *geometry_messages,
-                "Experimental CP2b: the editable project 3MF must be manually opened in OrcaSlicer desktop before production use.",
-                "The Ender 3 profile is a temporary Orca-derived generic profile with a Workpiece 235 x 235 x 235 mm envelope override; replace it with measured machine profiles.",
-                "Automatic orientation, arrangement and supports require acceptance testing with representative Workpiece models before manufacturing authority.",
-            ],
+            "warnings": project_warnings,
         }
         if response_mode == "binary":
             compact_inspection = {
@@ -833,44 +968,50 @@ async def build_project(
         return payload
 
 
+def slice_warnings(inspection: dict, decision: RoutingDecision, summary: dict, support: dict, stderr: str) -> list[dict]:
+    """Cheap, factual notes for the quote reader. Each names something a human should look at."""
+    warnings: list[dict] = []
+    if support["supports_used"]:
+        warnings.append({"code": "supports_used", "detail": f"Automatic supports add about {support['support_grams']} g of filament."})
+    dims = sorted(float(value) for value in inspection["dimensions_mm"])
+    envelope = sorted(decision.printer.envelope_mm)
+    if any(value > 0.9 * limit for value, limit in zip(dims, envelope, strict=True)):
+        warnings.append({"code": "near_envelope_limit", "detail": f"The part uses more than 90% of the {decision.printer.key} build volume in at least one axis; placement margin is small."})
+    if int(inspection.get("triangle_count") or 0) > 500_000:
+        warnings.append({"code": "high_triangle_count", "detail": f"{inspection['triangle_count']} triangles; slicing is slow and the preview is heavily sampled."})
+    if summary["print_time_seconds"] is None or summary["filament_grams"] is None or summary["layer_count"] is None:
+        warnings.append({"code": "incomplete_summary", "detail": "OrcaSlicer did not report one of print time, filament mass or layer count."})
+    notes = [line.strip() for line in (stderr or "").splitlines() if re.search(r"warn", line, re.I)]
+    for note in notes[:5]:
+        warnings.append({"code": "orca_notice", "detail": note[:200]})
+    return warnings
+
+
 @app.post("/v1/slice")
 async def slice_model(
+    _access: Annotated[None, Depends(slice_access)],
     file: Annotated[UploadFile, File(description="Single-colour STL")],
     material: Annotated[str, Form()] = "pla",
     quality: Annotated[str, Form()] = "balanced",
     strength: Annotated[str, Form()] = "functional",
     preoriented: Annotated[bool, Form()] = False,
-    printer: Annotated[str, Form()] = "ratrig_vcore3_300",
+    printer: Annotated[str, Form()] = AUTO,
+    preview: Annotated[str, Form()] = "moves",
 ) -> dict:
+    """Per-part quote slice. Routes through the same printer rule as /v1/project."""
     if material not in MATERIALS:
-        raise HTTPException(status_code=422, detail=f"material must be one of: {', '.join(MATERIALS)}")
+        raise api_error(422, "INVALID_PARAMETER", f"material must be one of: {', '.join(MATERIALS)}")
     if quality not in QUALITY:
-        raise HTTPException(status_code=422, detail=f"quality must be one of: {', '.join(QUALITY)}")
+        raise api_error(422, "INVALID_PARAMETER", f"quality must be one of: {', '.join(QUALITY)}")
     if strength not in STRENGTH:
-        raise HTTPException(status_code=422, detail=f"strength must be one of: {', '.join(STRENGTH)}")
-    if printer not in PROJECT_PRINTERS:
-        raise HTTPException(status_code=422, detail=f"printer must be one of: {', '.join(PROJECT_PRINTERS)}")
-    if material not in PROJECT_PRINTERS[printer]["materials"]:
-        raise HTTPException(status_code=422, detail=f"{material.upper()} is not supported by {printer}.")
+        raise api_error(422, "INVALID_PARAMETER", f"strength must be one of: {', '.join(STRENGTH)}")
+    if preview not in PREVIEW_MODES:
+        raise api_error(422, "INVALID_PARAMETER", f"preview must be one of: {', '.join(PREVIEW_MODES)}")
     filename = file.filename or "upload.stl"
     if Path(filename).suffix.lower() != ".stl":
-        raise HTTPException(status_code=415, detail="The pilot Orca service accepts STL files only.")
+        raise api_error(415, "UNSUPPORTED_MEDIA", "The slicer accepts STL files only.")
     if not ORCA_BIN.is_file():
-        raise HTTPException(status_code=503, detail="The pinned OrcaSlicer binary is not available.")
-    if printer == "ratrig_vcore3_300":
-        if not profiles_ready():
-            missing = [name for name, path in PROFILE_FILES.items() if not path.is_file()]
-            raise HTTPException(status_code=503, detail=f"Validated RatRig profiles are not installed: {', '.join(missing)}")
-    else:
-        required = (
-            ENDER_GENERIC_MACHINE,
-            ENDER_GENERIC_PROCESS,
-            ENDER_GENERIC_FILAMENT_COMMON,
-            ENDER_GENERIC_FILAMENT_BASES[material],
-            ENDER_GENERIC_FILAMENTS[material],
-        )
-        if any(not path.is_file() or path.stat().st_size <= 20 for path in required):
-            raise HTTPException(status_code=503, detail="The pinned OrcaSlicer Ender 3 generic profiles for the requested material are not available.")
+        raise api_error(503, "ENGINE_MISSING", "The pinned OrcaSlicer binary is not available.")
 
     material_profile = MATERIALS[material]
     with tempfile.TemporaryDirectory(prefix="open-slice-") as temporary:
@@ -879,35 +1020,26 @@ async def slice_model(
         output_dir = job / "output"
         output_dir.mkdir()
         upload_size = await save_upload(file, input_path)
+        try:
+            inspection = inspect_stl(input_path)
+        except ValueError as exc:
+            raise api_error(400, "SOURCE_INVALID", str(exc)) from exc
+
+        decision = route(printer, material, inspection["dimensions_mm"])
+        selected_printer = decision.printer.key
+        machine_path, process_base, filament_path = printer_profile_sources(selected_printer, material, job)
         process_path = job / "process.json"
-        if printer == "ratrig_vcore3_300":
-            machine_path = PROFILE_FILES["machine"]
-            filament_path = material_profile["filament"]
-            effective = build_process_profile(
-                material_profile["process"],
-                quality,
-                strength,
-                process_path,
-                str(material_profile["label"]),
-            )
-        else:
-            machine_path = job / "ender3-machine.json"
-            build_ender_generic_machine(machine_path)
-            filament_path = job / "ender3-filament.json"
-            build_ender_generic_filament(material, filament_path)
-            effective = build_process_profile(
-                ENDER_GENERIC_PROCESS,
-                quality,
-                strength,
-                process_path,
-                str(material_profile["label"]),
-                automatic_supports=True,
-            )
-        settings_arg = f"{machine_path};{process_path}"
-        xdg_root = job / "xdg"
-        xdg_config, xdg_cache, xdg_data = xdg_root / "config", xdg_root / "cache", xdg_root / "data"
-        for directory in (xdg_config, xdg_cache, xdg_data):
-            directory.mkdir(parents=True, exist_ok=True)
+        # Same automatic tree supports as the project path, so the quoted supports
+        # are the supports the delivered project will print.
+        effective = build_process_profile(
+            process_base,
+            quality,
+            strength,
+            process_path,
+            str(material_profile["label"]),
+            automatic_supports=True,
+        )
+        env = isolated_orca_env(job)
         command = [
             "xvfb-run", "-a", str(ORCA_BIN),
             "--slice", "0",
@@ -918,7 +1050,7 @@ async def slice_model(
         command.extend([
             "--ensure-on-bed",
             "--allow-newer-file",
-            "--load-settings", settings_arg,
+            "--load-settings", f"{machine_path};{process_path}",
             "--load-filaments", str(filament_path),
             "--outputdir", str(output_dir),
             str(input_path),
@@ -931,15 +1063,10 @@ async def slice_model(
                 text=True,
                 timeout=SLICE_TIMEOUT_SECONDS,
                 check=False,
-                env={
-                    **os.environ,
-                    "XDG_CONFIG_HOME": str(xdg_config),
-                    "XDG_CACHE_HOME": str(xdg_cache),
-                    "XDG_DATA_HOME": str(xdg_data),
-                },
+                env=env,
             )
         except subprocess.TimeoutExpired as exc:
-            raise HTTPException(status_code=504, detail=f"Slicing exceeded {SLICE_TIMEOUT_SECONDS} seconds.") from exc
+            raise api_error(504, "SLICE_TIMEOUT", f"Slicing exceeded {SLICE_TIMEOUT_SECONDS} seconds.") from exc
 
         result_path = output_dir / "result.json"
         engine_result = None
@@ -950,17 +1077,33 @@ async def slice_model(
                 engine_result = None
         if completed.returncode != 0:
             diagnostic = (completed.stderr or completed.stdout or "OrcaSlicer failed")[-2000:]
-            raise HTTPException(status_code=422, detail={"engine_result": engine_result, "diagnostic": diagnostic})
+            raise api_error(422, "SLICE_FAILED", "OrcaSlicer could not slice this model.", engine_result=engine_result, diagnostic=diagnostic)
         try:
             gcode = find_output(output_dir)
         except RuntimeError as exc:
             diagnostic = (completed.stderr or completed.stdout or str(exc))[-2000:]
-            raise HTTPException(status_code=422, detail={"engine_result": engine_result, "diagnostic": diagnostic}) from exc
+            raise api_error(422, "SLICE_FAILED", str(exc), engine_result=engine_result, diagnostic=diagnostic) from exc
 
         summary = parse_gcode_summary(gcode)
-        preview = sample_toolpath(gcode, MAX_PREVIEW_MOVES)
+        analysis = analyse_extrusions(gcode)
+        support = support_summary(analysis, summary["filament_grams"])
+        summary.update(
+            {
+                "support_grams": support["support_grams"],
+                "supports_used": support["supports_used"],
+                "bounding_box_mm": [round(float(value), 3) for value in inspection["dimensions_mm"]],
+                "triangle_count": inspection.get("triangle_count"),
+            }
+        )
+        toolpath = sample_toolpath(gcode, MAX_PREVIEW_MOVES) if preview == "moves" else empty_toolpath(analysis["total_extrusion_moves"])
         return {
-            "engine": {"name": "OrcaSlicer", "version": ORCA_VERSION, "license": "AGPL-3.0", "source": SOURCE_CODE_URL or None},
+            "engine": {
+                "name": "OrcaSlicer",
+                "version": ORCA_VERSION,
+                "license": "AGPL-3.0",
+                "source": SOURCE_CODE_URL or None,
+                "service_commit": SERVICE_COMMIT_SHA or None,
+            },
             "request": {
                 "filename": Path(filename).name,
                 "upload_bytes": upload_size,
@@ -969,20 +1112,36 @@ async def slice_model(
                 "strength": strength,
                 "preoriented": preoriented,
                 "printer": printer,
+                "preview": preview,
             },
+            "source": {"sha256": sha256_file(input_path), "inspection": inspection},
+            "printer": printer_payload(decision),
             "effective_process": {
                 "material": material_profile["label"],
                 "layer_height_mm": float(effective["layer_height"]),
                 "wall_loops": int(effective["wall_loops"]),
                 "infill_percent": 20,
-                "printer": printer,
-                "temporary_generic_machine_profile": bool(PROJECT_PRINTERS[printer]["temporary_generic"]),
+                "supports": "automatic",
+                "support_type": effective.get("support_type"),
+                "printer": selected_printer,
+                "temporary_generic_machine_profile": bool(decision.printer.temporary_generic),
+            },
+            "profiles": {
+                "machine": {"identity": f"{selected_printer}:machine", "sha256": sha256_file(machine_path)},
+                "process": {"identity": f"{selected_printer}:{material}:{quality}:{strength}:process", "sha256": sha256_file(process_path)},
+                "filament": {"identity": f"{selected_printer}:{material}:filament", "sha256": sha256_file(filament_path)},
             },
             "summary": summary,
-            "toolpath": preview,
+            "extrusion": {
+                "total_extrusion_moves": analysis["total_extrusion_moves"],
+                "extruded_mm_by_feature": analysis["extruded_mm_by_feature"],
+                "support_fraction": support["support_fraction"],
+            },
+            "toolpath": toolpath,
             "gcode_sha256": hashlib.sha256(gcode.read_bytes()).hexdigest(),
-            "warnings": [
+            "warnings": slice_warnings(inspection, decision, summary, support, completed.stderr),
+            "notes": [
                 "Sampled preview moves are for visualisation; validate production G-code in OrcaSlicer desktop.",
-                "The pilot accepts one STL and one selected material profile per request.",
+                "The quote slices one STL with one material profile per request; printer choice is internal to the workshop.",
             ],
         }

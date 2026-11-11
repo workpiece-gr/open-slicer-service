@@ -23,7 +23,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -r requirements.txt pytest httpx
 
       - name: Compile Python
         run: python -m compileall -q app tests
@@ -97,6 +97,45 @@ jobs:
           write_box("/tmp/workpiece-ratrig-only.stl", 250, 20, 20)
           PY
 
+      - name: Quote the cube through /v1/slice with the service token
+        run: |
+          set -e
+          status=$(curl --silent --output /tmp/slice-unauthorized.json --write-out "%{http_code}" \
+            -F file=@/tmp/workpiece-cube.stl -F material=pla http://127.0.0.1:8080/v1/slice)
+          test "$status" = "401"
+          status=$(curl --silent --output /tmp/slice-disabled.json --write-out "%{http_code}" \
+            -H "Authorization: Bearer ci-project-token" \
+            -F file=@/tmp/workpiece-cube.stl -F material=pla -F printer=ender3_generic_235 http://127.0.0.1:8080/v1/slice)
+          test "$status" = "422"
+          curl --fail-with-body --max-time 240 \
+            -H "Authorization: Bearer ci-project-token" \
+            -F file=@/tmp/workpiece-cube.stl \
+            -F material=pla \
+            -F quality=balanced \
+            -F strength=functional \
+            -F preview=none \
+            http://127.0.0.1:8080/v1/slice \
+            -o /tmp/slice.json
+          python - <<'PY'
+          import json
+
+          disabled = json.load(open("/tmp/slice-disabled.json", encoding="utf-8"))
+          assert disabled["detail"]["code"] == "PRINTER_DISABLED"
+          payload = json.load(open("/tmp/slice.json", encoding="utf-8"))
+          assert payload["printer"]["key"] == "ratrig_vcore3_300"
+          assert payload["printer"]["selection"] == "automatic_smallest_capable"
+          assert payload["engine"]["service_commit"] and len(payload["engine"]["service_commit"]) == 40
+          summary = payload["summary"]
+          assert summary["print_time_seconds"] > 0 and summary["filament_grams"] > 0 and summary["layer_count"] > 0
+          assert isinstance(summary["supports_used"], bool) and summary["support_grams"] >= 0
+          assert summary["bounding_box_mm"] == [20.0, 20.0, 20.0]
+          assert payload["toolpath"]["moves"] == [] and payload["toolpath"]["total_extrusion_moves"] > 0
+          for kind in ("machine", "process", "filament"):
+              assert len(payload["profiles"][kind]["sha256"]) == 64
+          health = json.load(open("/tmp/health.json", encoding="utf-8"))
+          print(json.dumps({"quote": {k: summary[k] for k in ("print_time_seconds", "filament_grams", "support_grams", "layer_count")}, "printers": list(health.get("printers", {}))}, indent=2))
+          PY
+
       - name: Build and reopen editable project 3MF
         run: |
           set +e
@@ -125,10 +164,12 @@ jobs:
 
           payload = json.load(open("/tmp/project.json", encoding="utf-8"))
           assert payload["experimental"] is True
-          assert payload["printer"]["key"] == "ender3_generic_235"
-          assert payload["printer"]["temporary_generic"] is True
+          assert payload["printer"]["key"] == "ratrig_vcore3_300"
+          assert payload["printer"]["temporary_generic"] is False
+          assert payload["printer"]["enabled"] is True and payload["printer"]["calibrated"] is True
+          assert payload["printer"]["selection"] == "automatic_smallest_capable"
           assert payload["request"]["quantity"] == 3
-          assert payload["request"]["orientation"] == "orca_auto"
+          assert payload["request"]["orientation"] == "orca_auto_plus_controlled_stability_rescue"
           assert payload["request"]["arrangement"] == "orca_auto"
           assert payload["request"]["supports"] == "automatic"
           assert payload["project"]["inspection"]["instance_count"] == 3
@@ -140,7 +181,7 @@ jobs:
               assert "3D/3dmodel.model" in archive.namelist()
               assert "Metadata/project_settings.config" in archive.namelist()
           project_bytes = base64.b64decode(payload["project"]["base64"], validate=True)
-          open("/tmp/workpiece-ender-project.3mf", "wb").write(project_bytes)
+          open("/tmp/workpiece-cube-project.3mf", "wb").write(project_bytes)
           print(json.dumps({
               "printer": payload["printer"],
               "project_sha256": payload["project"]["sha256"],
@@ -234,7 +275,7 @@ jobs:
           import json
 
           payload = json.load(open("/tmp/multiplate-project.json", encoding="utf-8"))
-          assert payload["printer"]["key"] == "ender3_generic_235"
+          assert payload["printer"]["key"] == "ratrig_vcore3_300"
           assert payload["request"]["quantity"] == 12
           assert payload["project"]["inspection"]["instance_count"] == 12
           assert payload["verification"]["reopened_in_fresh_orca_process"] is True
@@ -315,7 +356,7 @@ jobs:
           assert result["project_sha256"] == source["project"]["sha256"]
           assert result["plate_ids"] == expected
           assert [plate["plate_id"] for plate in result["plates"]] == expected
-          assert result["generation_receipt"]["printer"]["temporary_generic"] is True
+          assert result["generation_receipt"]["printer"]["temporary_generic"] is False
           for plate in result["plates"]:
               match = re.fullmatch(r"plate_([1-9][0-9]*)\.gcode", plate["filename"])
               assert match and int(match.group(1)) == plate["plate_id"]
@@ -393,7 +434,7 @@ jobs:
         with:
           name: cp2b-orca-project-3mf
           path: |
-            /tmp/workpiece-ender-project.3mf
+            /tmp/workpiece-cube-project.3mf
             /tmp/workpiece-ratrig-project.3mf
             /tmp/workpiece-multiplate-project.3mf
           if-no-files-found: error
