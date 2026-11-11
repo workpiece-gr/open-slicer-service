@@ -49,7 +49,7 @@ def _bounds_from_vertices(vertices):
     }
 
 
-def inspect_stl(path: Path) -> dict:
+def inspect_stl(path: Path, *, max_triangles: int | None = None, max_line_bytes: int | None = None) -> dict:
     """Validate an STL enough for routing and return a conservative axis-aligned envelope."""
     size = path.stat().st_size
     if size < 84:
@@ -60,6 +60,8 @@ def inspect_stl(path: Path) -> dict:
         triangle_count = struct.unpack("<I", header[80:84])[0]
         expected = 84 + triangle_count * 50
         if triangle_count > 0 and expected == size:
+            if max_triangles is not None and triangle_count > max_triangles:
+                raise ValueError("The STL exceeds the supported triangle complexity limit.")
             def binary_vertices():
                 for _ in range(triangle_count):
                     record = handle.read(50)
@@ -85,9 +87,18 @@ def inspect_stl(path: Path) -> dict:
     )
 
     def ascii_vertices():
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for line in handle:
+        with path.open("r", encoding="utf-8", errors="strict" if max_line_bytes is not None else "ignore") as handle:
+            vertices = 0
+            while True:
+                line = handle.readline(max_line_bytes + 1) if max_line_bytes is not None else handle.readline()
+                if not line:
+                    break
+                if max_line_bytes is not None and len(line.encode("utf-8")) > max_line_bytes:
+                    raise ValueError("The ASCII STL contains an oversized line.")
                 for match in vertex_re.finditer(line):
+                    vertices += 1
+                    if max_triangles is not None and vertices > max_triangles * 3:
+                        raise ValueError("The STL exceeds the supported triangle complexity limit.")
                     yield tuple(float(value) for value in match.groups())
 
     bounds = _bounds_from_vertices(ascii_vertices())

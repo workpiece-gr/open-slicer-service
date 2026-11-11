@@ -5,24 +5,28 @@ temporary_generic/selection, request.{material,quality,strength,quantity,support
 orientation,arrangement,verification_requested,response_mode}, profiles.*.identity and
 sha256, project.filename/media_type/bytes/sha256/inspection, verification, warnings,
 and the binary-mode headers X-Workpiece-Project-SHA256 / X-Workpiece-Project-Metadata.
+Requests pass through the ApiGuard and the native supervisor as in production.
 """
 
 import base64
 import hashlib
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import main
+from app.native_supervisor import NativeError
 from tests.test_slice_api import auth, fake_orca, write_box_stl  # noqa: F401 - fixtures
 
 
 @pytest.fixture
 def project_client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(main, "ENABLE_EXPERIMENTAL_PROJECT_API", True)
-    return TestClient(main.app)
+    with TestClient(main.app) as client:
+        yield client
 
 
 def project_request(client: TestClient, stl: Path, headers=None, **fields):
@@ -45,8 +49,7 @@ def test_project_json_mode_keeps_the_admin_contract_and_routes_to_the_enabled_pr
     assert printer["envelope_mm"] == [300.0, 300.0, 300.0]
     assert printer["selection"] == "automatic_smallest_capable"
     assert printer["enabled"] is True and printer["calibrated"] is True and printer["candidates"] == ["ratrig_vcore3_300"]
-    request = body["request"]
-    assert request == {
+    assert body["request"] == {
         "material": "pla",
         "quality": "balanced",
         "strength": "functional",
@@ -75,6 +78,7 @@ def test_project_json_mode_keeps_the_admin_contract_and_routes_to_the_enabled_pr
     assert verification["total_filament_grams"] == 12.5
     assert isinstance(body["warnings"], list) and all(isinstance(item, str) for item in body["warnings"])
     assert not any("Ender 3 profile" in item for item in body["warnings"])
+    assert main.NATIVE._slot.locked() is False
 
 
 def test_project_binary_mode_headers_match_the_website_validator(project_client, fake_orca, tmp_path: Path):
@@ -97,7 +101,8 @@ def test_project_binary_mode_headers_match_the_website_validator(project_client,
 
 def test_project_refusals_carry_codes(project_client, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
-    assert project_request(project_client, stl, headers={}).status_code == 401
+    unauthenticated = project_request(project_client, stl, headers={})
+    assert unauthenticated.status_code == 401 and unauthenticated.json()["detail"]["code"] == "SERVICE_AUTH_REQUIRED"
     disabled = project_request(project_client, stl, printer="ender3_generic_235")
     assert disabled.status_code == 422 and disabled.json()["detail"]["code"] == "PRINTER_DISABLED"
     huge = write_box_stl(tmp_path / "huge.stl", 400, 20, 20)
@@ -110,20 +115,27 @@ def test_project_refusals_carry_codes(project_client, fake_orca, tmp_path: Path,
     assert off.status_code == 404 and off.json()["detail"]["code"] == "PROJECT_DISABLED"
 
 
-def test_project_and_slice_share_the_orca_slot(project_client, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(main, "QUEUE_TIMEOUT_SECONDS", 1)
-    stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
-    assert main.ORCA_LOCK.acquire(timeout=1)
-    try:
-        response = project_request(project_client, stl)
-    finally:
-        main.ORCA_LOCK.release()
-    assert response.status_code == 503 and response.json()["detail"]["code"] == "BUSY"
+def test_project_reports_native_queue_busy_when_the_reservation_is_held(project_client, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    @asynccontextmanager
+    async def busy(_timeout):
+        raise NativeError("NATIVE_QUEUE_BUSY", "Native processing queue is busy.")
+        yield  # pragma: no cover
 
-
-def test_project_slice_failure_is_coded(project_client, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("FAKE_ORCA_FAIL", "1")
+    monkeypatch.setattr(main.NATIVE, "reservation", busy)
     stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
     response = project_request(project_client, stl)
-    assert response.status_code == 422 and response.json()["detail"]["code"] == "SLICE_FAILED"
-    assert main.ORCA_LOCK.locked() is False
+    assert response.status_code == 503 and response.json()["detail"]["code"] == "NATIVE_QUEUE_BUSY"
+
+
+def test_project_slice_failure_and_timeout_are_coded_and_release_the_slot(project_client, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
+    monkeypatch.setenv("FAKE_ORCA_FAIL", "1")
+    failed = project_request(project_client, stl)
+    assert failed.status_code == 422 and failed.json()["detail"]["code"] == "SLICE_FAILED"
+    assert main.NATIVE._slot.locked() is False
+    monkeypatch.delenv("FAKE_ORCA_FAIL")
+    monkeypatch.setattr(main, "SLICE_TIMEOUT_SECONDS", 1)
+    monkeypatch.setenv("FAKE_ORCA_SLEEP", "3")
+    timed_out = project_request(project_client, stl)
+    assert timed_out.status_code == 504 and timed_out.json()["detail"]["code"] == "SLICE_TIMEOUT"
+    assert main.NATIVE._slot.locked() is False and main.NATIVE.poisoned is False

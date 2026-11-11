@@ -10,6 +10,12 @@ This repository is intentionally licensed under **GNU AGPL-3.0-or-later**. Keep 
 
 Printer choice is internal to the workshop. The Workpiece website never shows a printer to customers; it validates the `printer.key` a response reports against `GET /v1/printers`.
 
+## One authentication point, one admission queue
+
+`app/api_guard.py` is an ASGI layer in front of the application. It authenticates every `/v1/*` request and the detailed `/health` with the service bearer token (`WORKPIECE_PROJECT_API_TOKEN`) **before a single body byte is received**, then admits at most one manufacturing request at a time with a short pending queue, bounds the body (declared and actual length, deadline, multipart preflight) and the response transfer. There is no second token check and no second queue inside the application: `/v1/slice`, `/v1/project` and `/v1/printers` trust the guard. Behind the guard, `app/native_supervisor.py` runs the one OrcaSlicer process per request under Linux containment (pidfd signalling, verified PID identities, descendant reaping, fail-closed poisoning); its reservation is the workload interlock across export/verify, not a queue customers can wait in.
+
+Public without a token: `/` (AGPL information), `/source` (the source offer) and `/healthz` (`{"ok": true}` or `503 SERVICE_NOT_READY`). `/health` (detailed: printers, queue, readiness) requires the token; this is the rule the Workpiece readiness check follows (it sends the bearer and expects `slice_authenticated`).
+
 ## Deployment paths
 
 - **Source:** this public GitHub repository, with `SOURCE_CODE_URL` pointing to the deployed source for AGPL compliance and `SOURCE_COMMIT_SHA` set to the exact 40-hex commit of the running image.
@@ -52,7 +58,7 @@ docker run --rm -p 127.0.0.1:8080:8080 \
   open-slicer-service
 ```
 
-Check `http://localhost:8080/health` (no token). It reports `profiles_ready: true` only after the machine profile and all ten material-specific process/filament profiles are present, and shows `printers`, `routing` and the `queue`.
+Check `http://localhost:8080/healthz` (no token) for readiness, or `/health` with `-H "Authorization: Bearer local-dev-token"` for the detailed report: it shows `profiles_ready: true` only after the machine profile and all ten material-specific process/filament profiles are present, plus `printers`, `routing`, `queue` and `slice_authenticated`.
 
 Slice a test STL (every `POST` needs the bearer token):
 
@@ -85,11 +91,15 @@ Unit tests run without OrcaSlicer: `pip install -r requirements.txt pytest httpx
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `WORKPIECE_PROJECT_API_TOKEN` | empty (refuses every `POST` with `TOKEN_NOT_CONFIGURED`) | server-to-server bearer token for `/v1/slice`, `/v1/project`, `/v1/printers`; the website sends it as `WORKPIECE_FDM_SLICER_TOKEN` |
+| `WORKPIECE_PROJECT_API_TOKEN` | empty (every `/v1/*` and `/health` request gets `503 SERVICE_AUTH_UNCONFIGURED`) | server-to-server bearer token checked by the ApiGuard for `/v1/slice`, `/v1/project`, `/v1/printers` and `/health`; the website sends it as `WORKPIECE_FDM_SLICER_TOKEN` |
 | `ENABLE_EXPERIMENTAL_PROJECT_API` | `0` | enables `/v1/project` |
-| `QUEUE_TIMEOUT_SECONDS` (alias `PROJECT_QUEUE_TIMEOUT_SECONDS`) | `30` | how long a request waits for the single OrcaSlicer slot before `BUSY` |
-| `SLICE_TIMEOUT_SECONDS` | `180` | per OrcaSlicer invocation |
-| `MAX_UPLOAD_BYTES` | 50 MiB | STL upload limit |
+| `FDM_MAX_PENDING_REQUESTS` (0–4), `FDM_ADMISSION_TIMEOUT_SECONDS` (1–30) | `2`, `30` | ApiGuard admission: one active request plus this many pending; a pending request that waits longer gets `503 ADMISSION_QUEUE_TIMEOUT`, one beyond the queue `429 ADMISSION_QUEUE_FULL` |
+| `FDM_BODY_TIMEOUT_SECONDS`, `FDM_RESPONSE_TIMEOUT_SECONDS` (1–30) | `15`, `15` | whole-body receive deadline (`408 REQUEST_BODY_TIMEOUT`) and absolute response transfer deadline |
+| `FDM_REQUESTS_PER_MINUTE` (1–120), `FDM_REQUEST_BURST` (1–60), `FDM_BYTES_PER_MINUTE` (1–512 MiB), `FDM_BYTE_BURST` (1–256 MiB) | `60`, `30`, `256 MiB`, `128 MiB` | service-global request and upload-byte budgets (`429 SERVICE_BUDGET_EXHAUSTED`); 40 failed authentications then `429 AUTH_ATTEMPT_BUDGET_EXHAUSTED` |
+| `QUEUE_TIMEOUT_SECONDS` (alias `PROJECT_QUEUE_TIMEOUT_SECONDS`) | `30` | wait for the native reservation behind the guard (`503 NATIVE_QUEUE_BUSY`) |
+| `SLICE_TIMEOUT_SECONDS` (1–180) | `180` | per OrcaSlicer invocation (`504 SLICE_TIMEOUT`) |
+| `MAX_UPLOAD_BYTES` (84 B–50 MiB) | 50 MiB | STL upload limit; the guard allows 1 MiB of multipart overhead on top |
+| `MAX_STL_TRIANGLES` (1–1 000 000) | 1 000 000 | STL complexity cap on both routes; ASCII STL lines are limited to 4096 bytes and must be UTF-8 (`400 SOURCE_INVALID`) |
 | `MAX_PREVIEW_MOVES` | `30000` | sampled toolpath size for `preview=moves` |
 | `MAX_PROJECT_QUANTITY`, `MAX_PROJECT_BYTES` | `50`, 80 MiB | project limits |
 | `PRINTERS_FILE` | `$PROFILE_ROOT/printers.json` | printer list override |
@@ -98,7 +108,7 @@ Unit tests run without OrcaSlicer: `pip install -r requirements.txt pytest httpx
 
 ## Experimental editable project 3MF (CP2b)
 
-The `/v1/project` endpoint is the staged manufacturing-project builder. It is disabled by default and requires the same bearer token as `/v1/slice`. One OrcaSlicer subprocess runs at a time per service process, shared with `/v1/slice`; a request that cannot get the slot within `QUEUE_TIMEOUT_SECONDS` receives `503 BUSY`. Until a distributed queue exists, deploy exactly one service replica.
+The `/v1/project` endpoint is the staged manufacturing-project builder. It is disabled by default and sits behind the same ApiGuard token and admission queue as `/v1/slice`. One OrcaSlicer process runs at a time per service process; the native reservation is held across export, inspection and verification. The guard's limits are deliberately **single-process**: deploy the reviewed single Uvicorn worker, never several replicas without separately reviewed shared admission accounting.
 
 It accepts one original STL plus quantity/material/quality/strength and:
 
@@ -131,15 +141,24 @@ JSON/base64 remains available for regression testing. Binary mode does not const
 
 ## API
 
-- `GET /health` — engine, licence/source and profile readiness, configured printers, routing rule, queue state (no token)
-- `GET /source` — redirects to the deployed public source repository
+- `GET /healthz` — minimal public readiness (`{"ok": true}` or `503 SERVICE_NOT_READY`), no token
+- `GET /health` — detailed health: engine, licence/source and profile readiness, `slice_authenticated`, configured printers, routing rule, admission queue and native slot state (token)
+- `GET /source` — redirects to the deployed public source repository (no token)
 - `GET /v1/printers` — the configured printer list without file paths (token)
 - `POST /v1/slice` — multipart STL plus `material`, `quality`, `strength`, optional `preoriented`, `printer` (`auto` default) and `preview` (`moves` default, `none` to skip the sampled toolpath); returns engine and profile provenance, the selected printer, slicer summary with support mass, extrusion by feature role, sampled extrusion moves and warnings (token)
 - `POST /v1/project` — editable Orca project 3MF builder with quantity, auto machine routing, auto orientation/arrangement/supports and fresh-Orca reopen verification (token, `ENABLE_EXPERIMENTAL_PROJECT_API=1`)
 
-Every refusal returns `{"detail": {"code": "...", "detail": "..."}}`. Codes: `UNAUTHORIZED` (401), `TOKEN_NOT_CONFIGURED` (503), `PROJECT_DISABLED` (404), `INVALID_PARAMETER` (422), `UNSUPPORTED_MEDIA` (415), `UPLOAD_TOO_LARGE` (413), `UPLOAD_EMPTY` / `SOURCE_INVALID` (400), `PRINTER_UNKNOWN` / `PRINTER_DISABLED` / `MATERIAL_UNSUPPORTED` / `NO_PRINTER_FITS` (422), `ENGINE_MISSING` / `PROFILES_MISSING` (503), `BUSY` (503, with `retry_after_seconds`), `SLICE_TIMEOUT` (504), `SLICE_FAILED` (422, with `engine_result` and `diagnostic` where available), `PROJECT_TOO_LARGE` / `PROJECT_INVALID` (422).
+Every refusal returns `{"detail": {"code": "...", "detail": "..."}}` (guard refusals also carry `message`, the same text).
 
-The API never sends a job to a printer. Uploaded models live only in a per-request temporary directory and are deleted after the response.
+- Guard, before the body is read: `SERVICE_AUTH_REQUIRED` (401, `WWW-Authenticate: Bearer`, `Connection: close`), `SERVICE_AUTH_UNCONFIGURED` (503), `AUTH_ATTEMPT_BUDGET_EXHAUSTED` / `SERVICE_BUDGET_EXHAUSTED` / `ADMISSION_QUEUE_FULL` (429, `Retry-After: 30`), `ADMISSION_QUEUE_TIMEOUT` / `SERVICE_UNAVAILABLE` / `UPLOAD_STORAGE_UNAVAILABLE` (503), `UNSUPPORTED_BODY_TYPE` (415), `INVALID_BODY_FRAMING` / `INVALID_MULTIPART` (400), `REQUEST_BODY_TOO_LARGE` / `MULTIPART_PART_LIMIT` / `MULTIPART_PART_TOO_LARGE` / `MULTIPART_HEADERS_TOO_LARGE` (413), `REQUEST_BODY_TIMEOUT` / `MULTIPART_PARSE_TIMEOUT` (408), `REQUEST_CANCELLED` (499).
+- Application: `PROJECT_DISABLED` (404), `INVALID_PARAMETER` (422), `UNSUPPORTED_MEDIA` (415), `UPLOAD_TOO_LARGE` (413), `UPLOAD_EMPTY` / `SOURCE_INVALID` (400; also the triangle and ASCII-line limits), `PRINTER_UNKNOWN` / `PRINTER_DISABLED` / `MATERIAL_UNSUPPORTED` / `NO_PRINTER_FITS` (422), `ENGINE_MISSING` / `PROFILES_MISSING` (503), `SLICE_TIMEOUT` (504, `native_code: NATIVE_TIMEOUT`), `SLICE_FAILED` (422, with `engine_result` and `diagnostic` where available), `PROJECT_TOO_LARGE` / `PROJECT_INVALID` (422).
+- Native supervisor (503, with `native_code`): `NATIVE_QUEUE_BUSY`, `NATIVE_UNAVAILABLE`, `NATIVE_START_FAILED`, `NATIVE_CONTAINMENT_FAILED`, `NATIVE_CLEANUP_FAILED`. A containment failure poisons the service: `/health` and `/healthz` turn 503, admission is refused and the private job directory is retained for diagnosis until an operator reconciles the container.
+
+## Native process lifecycle
+
+Slice, project export and fresh-project verification execute in isolated native sessions under one reservation. Each native stage keeps the `SLICE_TIMEOUT_SECONDS` ceiling (at most 180 s); the project reservation is held across export, validation and verification. Linux subreaper support, PID start-time identities, pidfds and matching container cgroup membership protect descendant termination. Timeout or client disconnect sends TERM to verified owned processes, escalates after one second and reaps children; a successful parent exit also triggers descendant cleanup before artifact acceptance. Native subprocesses do not receive the service token. Only the final 1 MiB of each captured stream is read into Python memory.
+
+The API never sends a job to a printer. Uploaded models live only in a per-request temporary directory and are deleted after the response (retained only after a containment failure, for diagnosis).
 
 ## AGPL deployment checklist
 

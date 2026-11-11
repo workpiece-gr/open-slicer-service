@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import math
 import os
 import re
-import secrets
+import shutil
 import subprocess
 import tempfile
-import threading
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from .api_guard import ApiGuard, GuardLimits, bounded_setting
+from .native_supervisor import NativeError, NativeSupervisor
 from .printers import AUTO, PrinterConfigError, PrinterRegistry, RoutingDecision, RoutingError, load_registry, route_printer
 from .project_builder import (
     build_project_command,
@@ -46,28 +49,31 @@ ORCA_VERSION = os.getenv("ORCA_VERSION", "2.4.2")
 ORCA_BIN = Path(os.getenv("ORCA_BIN", "/opt/orca/squashfs-root/AppRun"))
 PROFILE_ROOT = Path(os.getenv("PROFILE_ROOT", "/app/profiles"))
 SOURCE_CODE_URL = os.getenv("SOURCE_CODE_URL", "")
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
-SLICE_TIMEOUT_SECONDS = int(os.getenv("SLICE_TIMEOUT_SECONDS", "180"))
+# Bounded settings fail startup on invalid or widened values (upload ceiling, STL complexity, native deadline).
+MAX_UPLOAD_BYTES = bounded_setting("MAX_UPLOAD_BYTES", 50 * 1024 * 1024, 84, 50 * 1024 * 1024, integer=True)
+MAX_STL_TRIANGLES = bounded_setting("MAX_STL_TRIANGLES", 1_000_000, 1, 1_000_000, integer=True)
+MAX_STL_LINE_BYTES = 4096
+SLICE_TIMEOUT_SECONDS = bounded_setting("SLICE_TIMEOUT_SECONDS", 180, 1, 180, integer=True)
 MAX_PREVIEW_MOVES = int(os.getenv("MAX_PREVIEW_MOVES", "30000"))
 MAX_PROJECT_QUANTITY = int(os.getenv("MAX_PROJECT_QUANTITY", "50"))
 MAX_PROJECT_BYTES = int(os.getenv("MAX_PROJECT_BYTES", str(80 * 1024 * 1024)))
 ORCA_RESOURCE_ROOT = Path(os.getenv("ORCA_RESOURCE_ROOT", "/opt/orca/squashfs-root/resources/profiles"))
 ENABLE_EXPERIMENTAL_PROJECT_API = os.getenv("ENABLE_EXPERIMENTAL_PROJECT_API", "0").strip().lower() in {"1", "true", "yes"}
-# One server-to-server bearer token protects every slicing endpoint (/v1/slice,
-# /v1/project, /v1/printers). The Workpiece website sends it as WORKPIECE_FDM_SLICER_TOKEN.
+# One server-to-server bearer token protects every /v1/* route and the detailed
+# /health. The ApiGuard ASGI layer checks it before any body byte is received; the
+# Workpiece website sends it as WORKPIECE_FDM_SLICER_TOKEN.
 WORKPIECE_PROJECT_API_TOKEN = os.getenv("WORKPIECE_PROJECT_API_TOKEN", "").strip()
-# One OrcaSlicer subprocess at a time, shared by quoting and project generation.
-# Failure mode this prevents: concurrent Orca runs exceeding the container memory
-# cgroup and being killed mid-slice for every caller. PROJECT_QUEUE_TIMEOUT_SECONDS
-# is the older name of the same wait limit and is still honoured.
+# Native workload reservation wait (the ApiGuard admission queue in front of it is
+# bounded separately by FDM_ADMISSION_TIMEOUT_SECONDS). PROJECT_QUEUE_TIMEOUT_SECONDS
+# is the older name of the same value and is still honoured.
 QUEUE_TIMEOUT_SECONDS = max(1, int(os.getenv("QUEUE_TIMEOUT_SECONDS", os.getenv("PROJECT_QUEUE_TIMEOUT_SECONDS", "30"))))
 PROJECT_QUEUE_TIMEOUT_SECONDS = QUEUE_TIMEOUT_SECONDS
 SERVICE_COMMIT_SHA = os.getenv("SOURCE_COMMIT_SHA", "").strip()
-ORCA_LOCK = threading.Lock()
-PROJECT_GENERATION_LOCK = ORCA_LOCK
-_QUEUE_STATE_LOCK = threading.Lock()
-_QUEUE_STATE = {"waiting": 0}
 PREVIEW_MODES = ("moves", "none")
+# Linux native workload containment: one OrcaSlicer process at a time, verified
+# PID identities, pidfd signalling, descendant reaping, fail-closed poisoning.
+NATIVE = NativeSupervisor()
+GUARD: dict[str, ApiGuard] = {}
 
 MATERIALS = {
     "pla": {
@@ -150,7 +156,65 @@ def load_printers(path: Path | None = None) -> PrinterRegistry:
 PRINTERS = load_printers()
 PROJECT_PRINTERS = PRINTERS.legacy_table()
 
+@asynccontextmanager
+async def lifespan(_app):
+    try:
+        yield
+    finally:
+        await NATIVE.shutdown()
+
+
+@contextmanager
+def native_job(prefix):
+    job = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        yield str(job)
+    finally:
+        # Unverified native containment retains the private output for diagnosis.
+        if not NATIVE.poisoned:
+            try:
+                shutil.rmtree(job)
+            except OSError as error:
+                NATIVE._poisoned = True
+                raise api_error(503, "NATIVE_CLEANUP_FAILED", "Native job cleanup failed.") from error
+
+
+async def disconnect_guard(request, operation):
+    """Run a native operation; if the client disconnects first, contain the worker and stop."""
+    async def disconnected():
+        while True:
+            message = await request.receive()
+            if message["type"] == "http.disconnect":
+                return
+    work = asyncio.create_task(operation)
+    watch = asyncio.create_task(disconnected()) if request is not None else None
+    try:
+        if watch is None:
+            return await work
+        done, _ = await asyncio.wait((work, watch), return_when=asyncio.FIRST_COMPLETED)
+        if watch in done and not work.done():
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+            if NATIVE.poisoned:
+                raise api_error(503, "NATIVE_CONTAINMENT_FAILED", "Native termination could not be confirmed.")
+            raise api_error(499, "REQUEST_CANCELLED", "Native request cancelled.")
+        return await work
+    finally:
+        if watch is not None:
+            watch.cancel()
+        if not work.done():
+            work.cancel()
+        cleanup = asyncio.gather(work, *([watch] if watch is not None else []), return_exceptions=True)
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        await cleanup
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Open Slicer Service",
     version="0.4.0",
     license_info={"name": "GNU AGPL-3.0-or-later", "url": "https://www.gnu.org/licenses/agpl-3.0.html"},
@@ -163,6 +227,17 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "Authorization"],
+)
+
+# The single authentication and admission point (see app/api_guard.py). It reads the
+# token at request time so a rotated value needs no code change, refuses admission
+# while native containment is poisoned, and registers itself for /health.
+app.add_middleware(
+    ApiGuard,
+    token_getter=lambda: WORKPIECE_PROJECT_API_TOKEN,
+    limits=GuardLimits.from_environment(MAX_UPLOAD_BYTES),
+    unavailable_getter=lambda: NATIVE.poisoned,
+    on_create=lambda guard: GUARD.__setitem__("instance", guard),
 )
 
 
@@ -195,60 +270,38 @@ def ender_generic_profiles_ready() -> bool:
     return all(path.is_file() and path.stat().st_size > 20 for path in paths)
 
 
-def require_service_token(authorization: str | None) -> None:
-    if not WORKPIECE_PROJECT_API_TOKEN:
-        raise api_error(503, "TOKEN_NOT_CONFIGURED", "The slicer service token (WORKPIECE_PROJECT_API_TOKEN) is not configured.")
-    scheme, _, supplied = (authorization or "").partition(" ")
-    if scheme.lower() != "bearer" or not supplied or not secrets.compare_digest(supplied.strip(), WORKPIECE_PROJECT_API_TOKEN):
-        raise api_error(401, "UNAUTHORIZED", "A valid slicer service bearer token is required.", headers={"WWW-Authenticate": "Bearer"})
-
-
-def _acquire_orca_slot() -> None:
-    with _QUEUE_STATE_LOCK:
-        _QUEUE_STATE["waiting"] += 1
-    try:
-        acquired = ORCA_LOCK.acquire(timeout=QUEUE_TIMEOUT_SECONDS)
-    finally:
-        with _QUEUE_STATE_LOCK:
-            _QUEUE_STATE["waiting"] -= 1
-    if not acquired:
-        raise api_error(
-            503,
-            "BUSY",
-            f"The slicer is busy with another job and no slot opened within {QUEUE_TIMEOUT_SECONDS} seconds. Retry later.",
-            retry_after_seconds=QUEUE_TIMEOUT_SECONDS,
-        )
+def native_error(exc: NativeError) -> HTTPException:
+    """Supervisor refusals: a deadline is 504 SLICE_TIMEOUT; everything else is 503 with the native code."""
+    if exc.code == "NATIVE_TIMEOUT":
+        return api_error(504, "SLICE_TIMEOUT", str(exc), native_code=exc.code)
+    return api_error(503, exc.code, str(exc), native_code=exc.code)
 
 
 def queue_status() -> dict:
-    with _QUEUE_STATE_LOCK:
-        waiting = _QUEUE_STATE["waiting"]
-    return {"busy": ORCA_LOCK.locked(), "waiting": waiting, "timeout_seconds": QUEUE_TIMEOUT_SECONDS, "concurrency": 1}
+    """Admission state for /health: the ApiGuard queue in front, the native slot behind it."""
+    guard = GUARD.get("instance")
+    return {
+        "busy": bool(guard.lock.locked()) if guard else False,
+        "waiting": guard.pending if guard else 0,
+        "admitted": guard.admitted if guard else 0,
+        "max_pending": guard.limits.pending if guard else None,
+        "timeout_seconds": guard.limits.queue_seconds if guard else None,
+        "concurrency": 1,
+        "native_busy": NATIVE._slot.locked(),
+        "native_queue_timeout_seconds": QUEUE_TIMEOUT_SECONDS,
+    }
 
 
-def slice_access(authorization: Annotated[str | None, Header()] = None):
-    """Token, then the single Orca slot. Used by /v1/slice."""
-    require_service_token(authorization)
-    _acquire_orca_slot()
-    try:
-        yield
-    finally:
-        ORCA_LOCK.release()
-
-
-def project_access(authorization: Annotated[str | None, Header()] = None):
+async def project_access():
+    """The ApiGuard has already authenticated and admitted the request. Hold the native
+    reservation across export, inspection and verification."""
     if not ENABLE_EXPERIMENTAL_PROJECT_API:
         raise api_error(404, "PROJECT_DISABLED", "The project builder is not enabled.")
-    require_service_token(authorization)
-    _acquire_orca_slot()
     try:
-        yield
-    finally:
-        ORCA_LOCK.release()
-
-
-def printers_access(authorization: Annotated[str | None, Header()] = None) -> None:
-    require_service_token(authorization)
+        async with NATIVE.reservation(QUEUE_TIMEOUT_SECONDS):
+            yield
+    except NativeError as error:
+        raise native_error(error) from error
 
 
 @app.get("/")
@@ -264,13 +317,25 @@ def root() -> dict:
     }
 
 
+@app.get("/healthz")
+def healthz() -> dict:
+    """Public minimal readiness (no token): the only unauthenticated signal besides / and /source."""
+    if NATIVE.poisoned or not WORKPIECE_PROJECT_API_TOKEN or not ORCA_BIN.is_file() or not profiles_ready() or not source_url_is_public():
+        raise api_error(503, "SERVICE_NOT_READY", "The slicer service is not ready.")
+    return {"ok": True}
+
+
 @app.get("/health")
 def health() -> dict:
+    """Detailed health. Requires the service bearer token (enforced by the ApiGuard), which is
+    what the Workpiece readiness check sends; it expects `slice_authenticated` here."""
+    if NATIVE.poisoned:
+        raise api_error(503, "NATIVE_CONTAINMENT_FAILED", "Native containment requires operator reconciliation.")
     engine_ready = ORCA_BIN.is_file()
     profile_state = profiles_ready()
     source_ready = source_url_is_public()
     return {
-        "ok": engine_ready and profile_state and source_ready,
+        "ok": engine_ready and profile_state and source_ready and not NATIVE.poisoned,
         "engine": f"OrcaSlicer {ORCA_VERSION}",
         "engine_ready": engine_ready,
         "profiles_ready": profile_state,
@@ -298,7 +363,7 @@ def health() -> dict:
 
 
 @app.get("/v1/printers")
-def list_printers(_access: Annotated[None, Depends(printers_access)]) -> dict:
+def list_printers() -> dict:
     """The configured printer list without file paths. Internal: the website validates
     the ``printer.key`` a slice or project reports against it; customers never see it."""
     return PRINTERS.public()
@@ -549,6 +614,25 @@ def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]
     return completed
 
 
+def _orca_failed(command: list[str], completed: subprocess.CompletedProcess[str], env: dict[str, str]) -> HTTPException:
+    if env.get("ORCA_DEBUG_LOGS") == "1":
+        print("ORCA DEBUG command:", " ".join(command), flush=True)
+        print("ORCA DEBUG stdout:", (completed.stdout or "")[-10000:], flush=True)
+        print("ORCA DEBUG stderr:", (completed.stderr or "")[-10000:], flush=True)
+    return api_error(422, "SLICE_FAILED", "OrcaSlicer could not build or verify the requested project.")
+
+
+async def run_native(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run OrcaSlicer under the native supervisor (the live /v1/slice and /v1/project path)."""
+    try:
+        completed = await NATIVE.run(command, cwd=cwd, timeout=timeout, env=env)
+    except NativeError as exc:
+        raise native_error(exc) from exc
+    if completed.returncode != 0:
+        raise _orca_failed(command, completed, env)
+    return completed
+
+
 def find_outputs(directory: Path) -> list[Path]:
     return sorted(directory.rglob("*.gcode"), key=lambda item: item.name)
 
@@ -695,6 +779,7 @@ def find_output(directory: Path) -> Path:
 @app.post("/v1/project", response_model=None)
 async def build_project(
     _project_access: Annotated[None, Depends(project_access)],
+    request: Request,
     file: Annotated[UploadFile, File(description="Single-colour STL")],
     material: Annotated[str, Form()] = "pla",
     quality: Annotated[str, Form()] = "balanced",
@@ -720,12 +805,12 @@ async def build_project(
     if not ORCA_BIN.is_file():
         raise api_error(503, "ENGINE_MISSING", "The pinned OrcaSlicer binary is not available.")
 
-    with tempfile.TemporaryDirectory(prefix="open-project-") as temporary:
+    with native_job(prefix="open-project-") as temporary:
         job = Path(temporary)
         input_path = job / "source-original.stl"
         upload_size = await save_upload(file, input_path)
         try:
-            inspection = inspect_stl(input_path)
+            inspection = inspect_stl(input_path, max_triangles=MAX_STL_TRIANGLES, max_line_bytes=MAX_STL_LINE_BYTES)
         except ValueError as exc:
             raise api_error(400, "SOURCE_INVALID", str(exc)) from exc
 
@@ -764,7 +849,7 @@ async def build_project(
             # happens after export only when geometry/bed fit requires it.
             allow_arrange_rotations=bool(printer_record["arrange_rotations"]),
         )
-        run_orca(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
+        await disconnect_guard(request, run_native(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
         if not project_path.is_file():
             candidates = sorted(job.rglob("*.3mf"), key=lambda item: item.stat().st_size, reverse=True)
             if not candidates:
@@ -812,7 +897,7 @@ async def build_project(
             verification_dir = job / "verify"
             verification_dir.mkdir()
             verify_command = verify_project_command(orca_bin=ORCA_BIN, project_path=project_path, output_dir=verification_dir)
-            run_orca(verify_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env)
+            await disconnect_guard(request, run_native(verify_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
             gcode_files = find_outputs(verification_dir)
             if not gcode_files:
                 raise api_error(422, "SLICE_FAILED", "The exported project could not be reopened and sliced by a fresh Orca process.")
@@ -989,7 +1074,7 @@ def slice_warnings(inspection: dict, decision: RoutingDecision, summary: dict, s
 
 @app.post("/v1/slice")
 async def slice_model(
-    _access: Annotated[None, Depends(slice_access)],
+    request: Request,
     file: Annotated[UploadFile, File(description="Single-colour STL")],
     material: Annotated[str, Form()] = "pla",
     quality: Annotated[str, Form()] = "balanced",
@@ -998,7 +1083,8 @@ async def slice_model(
     printer: Annotated[str, Form()] = AUTO,
     preview: Annotated[str, Form()] = "moves",
 ) -> dict:
-    """Per-part quote slice. Routes through the same printer rule as /v1/project."""
+    """Per-part quote slice. Routes through the same printer rule as /v1/project.
+    Authentication and admission happened in the ApiGuard before the body was read."""
     if material not in MATERIALS:
         raise api_error(422, "INVALID_PARAMETER", f"material must be one of: {', '.join(MATERIALS)}")
     if quality not in QUALITY:
@@ -1014,14 +1100,14 @@ async def slice_model(
         raise api_error(503, "ENGINE_MISSING", "The pinned OrcaSlicer binary is not available.")
 
     material_profile = MATERIALS[material]
-    with tempfile.TemporaryDirectory(prefix="open-slice-") as temporary:
+    with native_job(prefix="open-slice-") as temporary:
         job = Path(temporary)
         input_path = job / "input.stl"
         output_dir = job / "output"
         output_dir.mkdir()
         upload_size = await save_upload(file, input_path)
         try:
-            inspection = inspect_stl(input_path)
+            inspection = inspect_stl(input_path, max_triangles=MAX_STL_TRIANGLES, max_line_bytes=MAX_STL_LINE_BYTES)
         except ValueError as exc:
             raise api_error(400, "SOURCE_INVALID", str(exc)) from exc
 
@@ -1056,17 +1142,10 @@ async def slice_model(
             str(input_path),
         ])
         try:
-            completed = subprocess.run(
-                command,
-                cwd=job,
-                capture_output=True,
-                text=True,
-                timeout=SLICE_TIMEOUT_SECONDS,
-                check=False,
-                env=env,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise api_error(504, "SLICE_TIMEOUT", f"Slicing exceeded {SLICE_TIMEOUT_SECONDS} seconds.") from exc
+            async with NATIVE.reservation(QUEUE_TIMEOUT_SECONDS):
+                completed = await disconnect_guard(request, NATIVE.run(command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
+        except NativeError as exc:
+            raise native_error(exc) from exc
 
         result_path = output_dir / "result.json"
         engine_result = None

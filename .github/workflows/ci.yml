@@ -56,8 +56,13 @@ jobs:
       - name: Wait for health
         run: |
           for attempt in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:8080/health > /tmp/health.json; then
+            if curl --fail --silent http://127.0.0.1:8080/healthz > /tmp/healthz.json; then
+              cat /tmp/healthz.json
+              status=$(curl --silent --output /tmp/health-unauthenticated.json --write-out "%{http_code}" http://127.0.0.1:8080/health)
+              test "$status" = "401"
+              curl --fail --silent -H "Authorization: Bearer ci-project-token" http://127.0.0.1:8080/health > /tmp/health.json
               cat /tmp/health.json
+              python3 -c 'import json; h=json.load(open("/tmp/health.json")); assert h["slice_authenticated"] is True and h["ok"] is True'
               exit 0
             fi
             sleep 2

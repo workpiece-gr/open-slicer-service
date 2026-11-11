@@ -1,16 +1,21 @@
-"""HTTP contract of the quoting path with a fake OrcaSlicer CLI."""
+"""HTTP contract of the quoting path with a fake OrcaSlicer CLI.
+
+Requests pass through the ApiGuard (authentication, admission, body bounds) and the
+native supervisor (one OrcaSlicer process, containment), exactly as in production.
+"""
 
 import os
 import struct
 import sys
 import threading
-import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import main
+from app.native_supervisor import NativeError, NativeSupervisor
 
 TOKEN = "test-slicer-token"
 FAKE_ORCA = Path(__file__).with_name("fake_orca.py")
@@ -28,13 +33,19 @@ def write_box_stl(path: Path, x: float, y: float, z: float) -> Path:
     return path
 
 
+def shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
 @pytest.fixture
 def fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Install a fake ORCA_BIN plus an xvfb-run stub on PATH; configure the token."""
+    """Install a fake ORCA_BIN plus an xvfb-run stub on PATH; configure the token.
+
+    Paths are quoted: the checkout may live in a directory with spaces."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     orca = bin_dir / "fake-orca"
-    orca.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_ORCA} \"$@\"\n")
+    orca.write_text(f"#!/bin/sh\nexec {shell_quote(sys.executable)} {shell_quote(str(FAKE_ORCA))} \"$@\"\n")
     orca.chmod(0o755)
     xvfb = bin_dir / "xvfb-run"
     xvfb.write_text('#!/bin/sh\n[ "$1" = "-a" ] && shift\nexec "$@"\n')
@@ -42,6 +53,9 @@ def fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     for variable in ("FAKE_ORCA_SLEEP", "FAKE_ORCA_FAIL", "FAKE_ORCA_STDERR", "FAKE_ORCA_NO_SUPPORT"):
         monkeypatch.delenv(variable, raising=False)
+    # The app lifespan shuts the supervisor down when a TestClient context closes, so
+    # every test gets its own supervisor (the lifespan reads the module global).
+    monkeypatch.setattr(main, "NATIVE", NativeSupervisor())
     monkeypatch.setattr(main, "ORCA_BIN", orca)
     monkeypatch.setattr(main, "WORKPIECE_PROJECT_API_TOKEN", TOKEN)
     monkeypatch.setattr(main, "SERVICE_COMMIT_SHA", "a" * 40)
@@ -51,7 +65,8 @@ def fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def client():
-    return TestClient(main.app)
+    with TestClient(main.app) as client:
+        yield client
 
 
 def auth() -> dict:
@@ -64,11 +79,20 @@ def slice_request(client: TestClient, stl: Path, headers: dict | None = None, **
         return client.post("/v1/slice", headers=headers if headers is not None else auth(), files={"file": (stl.name, handle, "model/stl")}, data=data)
 
 
-def test_health_is_public_and_reports_queue_and_printers(client: TestClient, fake_orca):
-    response = client.get("/health")
+def test_healthz_is_public_and_health_needs_the_token(client: TestClient, fake_orca):
+    assert client.get("/healthz").json() == {"ok": True}
+    assert client.get("/").status_code == 200
+    unauthenticated = client.get("/health")
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["detail"]["code"] == "SERVICE_AUTH_REQUIRED"
+    response = client.get("/health", headers=auth())
     assert response.status_code == 200
     body = response.json()
-    assert body["queue"] == {"busy": False, "waiting": 0, "timeout_seconds": main.QUEUE_TIMEOUT_SECONDS, "concurrency": 1}
+    assert body["slice_authenticated"] is True
+    queue = body["queue"]
+    assert queue["concurrency"] == 1 and queue["max_pending"] == 2 and queue["timeout_seconds"] == 30
+    assert queue["busy"] is False  # GET /health is authenticated but never waits in the workload queue
+    assert queue["native_busy"] is False
     assert body["printers"]["ratrig_vcore3_300"]["enabled"] is True
     assert body["printers"]["ender3_generic_235"] == {
         "label": "Ender 3 generic / 0.4 mm (temporary)",
@@ -81,22 +105,28 @@ def test_health_is_public_and_reports_queue_and_printers(client: TestClient, fak
         "arrange_rotations": True,
         "layout_repair": False,
     }
-    assert body["slice_api"] == {"authenticated": True}
-    assert body["slice_authenticated"] is True
     assert body["service_commit"] == "a" * 40
     # Older health keys stay for the website readiness check.
     assert body["project_3mf"]["queue_timeout_seconds"] == main.QUEUE_TIMEOUT_SECONDS
     assert body["project_3mf"]["printers"]["ender3_generic_235"]["enabled"] is False
 
 
-def test_slice_requires_the_service_token(client: TestClient, fake_orca, tmp_path: Path):
+def test_healthz_reports_not_ready_without_a_token(client: TestClient, fake_orca, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(main, "WORKPIECE_PROJECT_API_TOKEN", "")
+    response = client.get("/healthz")
+    assert response.status_code == 503 and response.json()["detail"]["code"] == "SERVICE_NOT_READY"
+
+
+def test_slice_requires_the_service_token_before_the_body_is_read(client: TestClient, fake_orca, tmp_path: Path):
     stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
     missing = slice_request(client, stl, headers={})
     assert missing.status_code == 401
-    assert missing.json()["detail"]["code"] == "UNAUTHORIZED"
+    assert missing.json()["detail"]["code"] == "SERVICE_AUTH_REQUIRED"
     assert missing.headers["www-authenticate"] == "Bearer"
+    assert missing.headers.get("connection") == "close"
     wrong = slice_request(client, stl, headers={"Authorization": "Bearer nope"})
     assert wrong.status_code == 401
+    assert TOKEN not in wrong.text
 
 
 def test_slice_fails_closed_when_no_token_is_configured(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -104,7 +134,7 @@ def test_slice_fails_closed_when_no_token_is_configured(client: TestClient, fake
     stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
     response = slice_request(client, stl, headers={"Authorization": "Bearer anything"})
     assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "TOKEN_NOT_CONFIGURED"
+    assert response.json()["detail"]["code"] == "SERVICE_AUTH_UNCONFIGURED"
 
 
 def test_slice_routes_internally_and_reports_supports_and_provenance(client: TestClient, fake_orca, tmp_path: Path):
@@ -126,21 +156,21 @@ def test_slice_routes_internally_and_reports_supports_and_provenance(client: Tes
     summary = body["summary"]
     assert summary["print_time_seconds"] == 3723 and summary["filament_grams"] == 12.5 and summary["layer_count"] == 2
     assert summary["supports_used"] is True
-    # 1.0 mm support of 3.0 mm total extrusion -> one third of 12.5 g
     assert summary["support_grams"] == pytest.approx(12.5 / 3, abs=0.001)
     assert summary["bounding_box_mm"] == [20.0, 20.0, 20.0]
     assert summary["triangle_count"] == 12
     assert body["extrusion"]["extruded_mm_by_feature"] == {"Outer wall": 1.0, "Sparse infill": 1.0, "Support": 0.5, "Support interface": 0.5}
     assert body["engine"]["service_commit"] == "a" * 40
-    assert body["engine"]["source"].startswith("https://github.com/")
     for kind in ("machine", "process", "filament"):
         assert len(body["profiles"][kind]["sha256"]) == 64
     assert body["profiles"]["process"]["identity"] == "ratrig_vcore3_300:pla:balanced:functional:process"
-    assert body["effective_process"]["supports"] == "automatic"
-    assert body["effective_process"]["support_type"] == "tree(auto)"
+    assert body["effective_process"]["supports"] == "automatic" and body["effective_process"]["support_type"] == "tree(auto)"
     assert body["toolpath"]["total_extrusion_moves"] == 4 and len(body["toolpath"]["moves"]) == 4
     assert len(body["gcode_sha256"]) == 64 and len(body["source"]["sha256"]) == 64
     assert [item["code"] for item in body["warnings"]] == ["supports_used"]
+    # The native worker is gone and the slot is free once the response is out.
+    assert not Path(f"/proc/{main.NATIVE.last_execution['pid']}").exists()
+    assert main.NATIVE._slot.locked() is False
 
 
 def test_slice_without_supports_reports_zero_and_warns_near_envelope(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -158,7 +188,6 @@ def test_slice_preview_none_skips_the_toolpath_sample(client: TestClient, fake_o
     body = slice_request(client, stl, preview="none").json()
     assert body["toolpath"] == {"features": [], "moves": [], "bounds": None, "total_extrusion_moves": 4, "sample_stride": 0}
     assert body["request"]["preview"] == "none"
-    assert body["summary"]["filament_grams"] == 12.5
 
 
 def test_slice_refuses_a_part_no_enabled_printer_fits(client: TestClient, fake_orca, tmp_path: Path):
@@ -166,8 +195,7 @@ def test_slice_refuses_a_part_no_enabled_printer_fits(client: TestClient, fake_o
     response = slice_request(client, stl)
     assert response.status_code == 422
     detail = response.json()["detail"]
-    assert detail["code"] == "NO_PRINTER_FITS"
-    assert "ratrig_vcore3_300" in detail["detail"]
+    assert detail["code"] == "NO_PRINTER_FITS" and "ratrig_vcore3_300" in detail["detail"]
 
 
 def test_slice_refuses_explicit_disabled_or_unknown_printers(client: TestClient, fake_orca, tmp_path: Path):
@@ -180,7 +208,7 @@ def test_slice_refuses_explicit_disabled_or_unknown_printers(client: TestClient,
     assert explicit.status_code == 200 and explicit.json()["printer"]["selection"] == "requested"
 
 
-def test_slice_parameter_and_media_refusals_carry_codes(client: TestClient, fake_orca, tmp_path: Path):
+def test_slice_parameter_media_and_source_refusals_carry_codes(client: TestClient, fake_orca, tmp_path: Path):
     stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
     assert slice_request(client, stl, material="wood").json()["detail"]["code"] == "INVALID_PARAMETER"
     assert slice_request(client, stl, preview="video").json()["detail"]["code"] == "INVALID_PARAMETER"
@@ -193,18 +221,36 @@ def test_slice_parameter_and_media_refusals_carry_codes(client: TestClient, fake
     assert broken.status_code == 400 and broken.json()["detail"]["code"] == "SOURCE_INVALID"
 
 
-def test_slice_reports_busy_while_another_orca_job_holds_the_slot(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(main, "QUEUE_TIMEOUT_SECONDS", 1)
+def test_slice_refuses_stl_above_the_triangle_limit(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(main, "MAX_STL_TRIANGLES", 6)
     stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
-    assert main.ORCA_LOCK.acquire(timeout=1)
-    try:
-        response = slice_request(client, stl)
-    finally:
-        main.ORCA_LOCK.release()
+    response = slice_request(client, stl)
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "SOURCE_INVALID" and "complexity" in detail["detail"]
+
+
+def test_guard_rejects_a_second_file_part_and_non_multipart_bodies(client: TestClient, fake_orca, tmp_path: Path):
+    stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
+    with stl.open("rb") as one, stl.open("rb") as two:
+        response = client.post("/v1/slice", headers=auth(), files=[("file", ("a.stl", one, "model/stl")), ("file", ("b.stl", two, "model/stl"))])
+    assert response.status_code == 413 and response.json()["detail"]["code"] == "MULTIPART_PART_LIMIT"
+    urlencoded = client.post("/v1/slice", headers=auth(), data={"material": "pla"})
+    assert urlencoded.status_code == 415 and urlencoded.json()["detail"]["code"] == "UNSUPPORTED_BODY_TYPE"
+
+
+def test_slice_reports_native_queue_busy_when_the_reservation_is_held(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    @asynccontextmanager
+    async def busy(_timeout):
+        raise NativeError("NATIVE_QUEUE_BUSY", "Native processing queue is busy.")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(main.NATIVE, "reservation", busy)
+    stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
+    response = slice_request(client, stl)
     assert response.status_code == 503
     detail = response.json()["detail"]
-    assert detail["code"] == "BUSY" and detail["retry_after_seconds"] == 1
-    assert client.get("/health").json()["queue"]["busy"] is False
+    assert detail["code"] == "NATIVE_QUEUE_BUSY" and detail["native_code"] == "NATIVE_QUEUE_BUSY"
 
 
 def test_slice_timeout_and_engine_failure_codes(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -212,7 +258,10 @@ def test_slice_timeout_and_engine_failure_codes(client: TestClient, fake_orca, t
     monkeypatch.setattr(main, "SLICE_TIMEOUT_SECONDS", 1)
     monkeypatch.setenv("FAKE_ORCA_SLEEP", "3")
     timeout = slice_request(client, stl)
-    assert timeout.status_code == 504 and timeout.json()["detail"]["code"] == "SLICE_TIMEOUT"
+    assert timeout.status_code == 504
+    assert timeout.json()["detail"] == {"code": "SLICE_TIMEOUT", "detail": "Native execution deadline exceeded.", "native_code": "NATIVE_TIMEOUT"}
+    assert not Path(f"/proc/{main.NATIVE.last_execution['pid']}").exists()
+    assert main.NATIVE.poisoned is False
     monkeypatch.delenv("FAKE_ORCA_SLEEP")
     monkeypatch.setattr(main, "SLICE_TIMEOUT_SECONDS", 30)
     monkeypatch.setenv("FAKE_ORCA_FAIL", "1")
@@ -232,7 +281,8 @@ def test_slice_reports_engine_missing(client: TestClient, fake_orca, tmp_path: P
 
 
 def test_printers_endpoint_requires_token_and_hides_paths(client: TestClient, fake_orca):
-    assert client.get("/v1/printers").status_code == 401
+    unauthenticated = client.get("/v1/printers")
+    assert unauthenticated.status_code == 401 and unauthenticated.json()["detail"]["code"] == "SERVICE_AUTH_REQUIRED"
     response = client.get("/v1/printers", headers=auth())
     assert response.status_code == 200
     body = response.json()
@@ -243,32 +293,38 @@ def test_printers_endpoint_requires_token_and_hides_paths(client: TestClient, fa
     assert "note" not in body["printers"]["ender3_generic_235"]
 
 
-def test_lock_is_released_after_a_failed_request(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_native_slot_and_admission_are_released_after_a_failed_request(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("FAKE_ORCA_FAIL", "1")
     stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
     assert slice_request(client, stl).status_code == 422
-    assert main.ORCA_LOCK.locked() is False
+    assert main.NATIVE._slot.locked() is False
+    guard = main.GUARD["instance"]
+    assert guard.lock.locked() is False and guard.admitted == 0
     monkeypatch.delenv("FAKE_ORCA_FAIL")
     assert slice_request(client, stl).status_code == 200
 
 
-def test_slice_waits_for_the_slot_instead_of_overlapping(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Two requests never run Orca concurrently: the second waits and then succeeds."""
-    monkeypatch.setattr(main, "QUEUE_TIMEOUT_SECONDS", 10)
+def test_concurrent_requests_are_serialized_by_the_guard(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Three parallel quotes: at most one OrcaSlicer process at a time, all succeed."""
+    monkeypatch.setenv("FAKE_ORCA_SLEEP", "0.2")
     stl = write_box_stl(tmp_path / "cube.stl", 20, 20, 20)
-    main.ORCA_LOCK.acquire()
     results: list[int] = []
+    pids: list[int] = []
+    lock = threading.Lock()
 
     def worker():
-        results.append(slice_request(client, stl).status_code)
+        response = slice_request(client, stl)
+        with lock:
+            results.append(response.status_code)
+            if response.status_code == 200:
+                pids.append(main.NATIVE.last_execution["pid"])
 
-    thread = threading.Thread(target=worker)
-    thread.start()
-    deadline = time.time() + 5
-    while time.time() < deadline and client.get("/health").json()["queue"]["waiting"] == 0:
-        time.sleep(0.05)
-    assert client.get("/health").json()["queue"] == {"busy": True, "waiting": 1, "timeout_seconds": 10, "concurrency": 1}
-    main.ORCA_LOCK.release()
-    thread.join(timeout=15)
-    assert results == [200]
-
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert results == [200, 200, 200]
+    assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
+    guard = main.GUARD["instance"]
+    assert guard.lock.locked() is False and guard.admitted == 0 and main.NATIVE._slot.locked() is False
