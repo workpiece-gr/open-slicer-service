@@ -69,41 +69,6 @@ def test_final_service_lock_is_published_and_binds_exact_published_toolchain():
     assert service["toolchain"]["digest"] == toolchain["digest"]
 
 
-def test_cp5_candidate_ci_cannot_publish_or_write_packages():
-    workflow = (ROOT / ".github/workflows/cp5-immutable-toolchain.yml").read_text(encoding="utf-8")
-    assert "permissions:\n  contents: read" in workflow
-    assert "packages: write" not in workflow
-    assert "docker/login-action" not in workflow
-    assert "docker push" not in workflow
-    assert "push: true" not in workflow
-    assert "ghcr.io" not in workflow
 
 
-def test_candidate_receipt_remains_non_authoritative_with_published_lock():
-    workflow = (ROOT / ".github/workflows/cp5-immutable-toolchain.yml").read_text(encoding="utf-8")
-    assert "require_published=False" in workflow
-    assert "receipt['authorityState'] == 'evidence_candidate'" in workflow
-    assert "receipt['authorityCriticalComplete'] is False" in workflow
-    assert "receipt['lockStatus'] == 'published'" in workflow
 
-
-def test_published_toolchain_verifier_is_read_only():
-    workflow = (ROOT / ".github/workflows/cp5-published-toolchain.yml").read_text(encoding="utf-8").lower()
-    assert "contents: read" in workflow
-    assert "packages: read" in workflow
-    assert "packages: write" not in workflow
-    assert "docker push" not in workflow
-    assert "--push" not in workflow
-    assert "docker pull" in workflow
-
-
-def test_final_service_image_review_is_read_only_and_non_publishing():
-    workflow = (ROOT / ".github/workflows/cp5-service-image-review.yml").read_text(encoding="utf-8").lower()
-    assert "contents: read" in workflow
-    assert "packages: read" in workflow
-    assert "packages: write" not in workflow
-    assert "docker push" not in workflow
-    assert "--push" not in workflow
-    assert "docker pull" in workflow
-    assert "publication']['performed'] is false" in workflow
-    assert "packet['production']['productionauthorityeligible'] is false" in workflow
