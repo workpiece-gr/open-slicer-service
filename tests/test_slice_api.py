@@ -67,6 +67,12 @@ def fake_orca(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 def client():
     with TestClient(main.app) as client:
+        # The ApiGuard request/byte budget lives on the one app instance for the whole test session;
+        # refill it so a test is not refused by requests other tests already made.
+        guard = main.GUARD.get("instance")
+        if guard is not None:
+            guard.requests = guard.limits.request_burst
+            guard.bytes = guard.limits.byte_burst
         yield client
 
 
