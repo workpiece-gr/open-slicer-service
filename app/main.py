@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from .api_guard import ApiGuard, GuardLimits, bounded_setting
+from .fdm_geometry_stability import source_is_rod_like
 from .native_supervisor import NativeError, NativeSupervisor
 from .printers import AUTO, PrinterConfigError, PrinterRegistry, RoutingDecision, RoutingError, load_registry, route_printer
 from .project_builder import (
@@ -381,6 +382,44 @@ def source() -> RedirectResponse:
     return RedirectResponse(SOURCE_CODE_URL, status_code=307)
 
 
+def machine_nozzle_diameter_mm(machine_path: Path) -> float:
+    """The first nozzle diameter of a machine profile (OrcaSlicer stores it as a list of strings)."""
+    try:
+        machine = json.loads(machine_path.read_text(encoding="utf-8"))
+        values = machine.get("nozzle_diameter")
+        if isinstance(values, str):
+            values = [values]
+        nozzle = float(values[0])
+    except (OSError, json.JSONDecodeError, TypeError, IndexError, ValueError) as exc:
+        raise RuntimeError(f"{machine_path} has no usable nozzle_diameter") from exc
+    if not math.isfinite(nozzle) or nozzle <= 0:
+        raise RuntimeError(f"{machine_path} has an invalid nozzle_diameter")
+    return nozzle
+
+
+def absolute_first_layer_line_width(profile: dict, nozzle_diameter_mm: float) -> str | None:
+    """OrcaSlicer's CLI arranger (get_real_skirt_dist, 2.4.2 and 2.5.0) reads
+    ``initial_layer_line_width`` with opt_float, which returns the bare number of a
+    percentage value: the RatRig profiles' ``110%`` becomes 110 mm per skirt loop, the
+    arrange bed shrinks by skirt_distance + loops * 110 = 222 mm per side, and any part
+    longer than about 144 mm is "not fully inside the print volume" (exit -50) even
+    though it fits the 300 mm bed. The same physical width written in millimetres
+    (110% of a 0.4 mm nozzle is 0.44 mm) makes the arranger measure the real skirt
+    clearance. Returns None when the profile already states an absolute width."""
+    raw = str(profile.get("initial_layer_line_width") or "").strip()
+    if not raw or raw in {"0", "0%"}:
+        raw = str(profile.get("line_width") or "").strip()
+    if not raw.endswith("%"):
+        return None
+    try:
+        percent = float(raw[:-1])
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid initial_layer_line_width percentage: {raw!r}") from exc
+    if not math.isfinite(percent) or percent <= 0:
+        raise RuntimeError(f"Invalid initial_layer_line_width percentage: {raw!r}")
+    return f"{percent / 100.0 * nozzle_diameter_mm:.4g}"
+
+
 def build_process_profile(
     base_path: Path,
     quality: str,
@@ -390,6 +429,7 @@ def build_process_profile(
     automatic_supports: bool = False,
     project_reopen_safe: bool = False,
     single_colour_project: bool = False,
+    nozzle_diameter_mm: float | None = None,
 ) -> dict:
     try:
         profile = json.loads(base_path.read_text(encoding="utf-8"))
@@ -408,6 +448,10 @@ def build_process_profile(
             "sparse_infill_density": "20%",
         }
     )
+    if nozzle_diameter_mm is not None:
+        absolute = absolute_first_layer_line_width(profile, nozzle_diameter_mm)
+        if absolute is not None:
+            profile["initial_layer_line_width"] = absolute
     if automatic_supports:
         support_type = str(profile.get("support_type") or "tree(auto)").replace("(manual)", "(auto)")
         if "(auto)" not in support_type:
@@ -545,6 +589,7 @@ def project_profile_paths(printer: str, material: str, job: Path, quality: str, 
         automatic_supports=True,
         project_reopen_safe=True,
         single_colour_project=True,
+        nozzle_diameter_mm=machine_nozzle_diameter_mm(machine_path),
     )
     return machine_path, process_path, filament_path
 
@@ -617,6 +662,20 @@ def run_orca(command: list[str], *, cwd: Path, timeout: int, env: dict[str, str]
                     print("ORCA DEBUG output inspection failed:", repr(debug_exc), flush=True)
         raise api_error(422, "SLICE_FAILED", "OrcaSlicer could not build or verify the requested project.")
     return completed
+
+
+# OrcaSlicer CLI_NO_SUITABLE_OBJECTS: the plate is empty or no object is fully inside
+# the print volume (result.json return_code -50; the process exit status is -50 & 0xFF).
+ORCA_NO_SUITABLE_OBJECTS = -50
+
+
+def orca_found_no_suitable_objects(completed: subprocess.CompletedProcess[str], engine_result: dict | None) -> bool:
+    """True when OrcaSlicer's only complaint is that its arranger left nothing on the plate."""
+    if completed.returncode == 0:
+        return False
+    if isinstance(engine_result, dict) and "return_code" in engine_result:
+        return engine_result.get("return_code") == ORCA_NO_SUITABLE_OBJECTS
+    return completed.returncode == (ORCA_NO_SUITABLE_OBJECTS & 0xFF)
 
 
 def _orca_failed(command: list[str], completed: subprocess.CompletedProcess[str], env: dict[str, str]) -> HTTPException:
@@ -1059,11 +1118,13 @@ async def build_project(
         return payload
 
 
-def slice_warnings(inspection: dict, decision: RoutingDecision, summary: dict, support: dict, stderr: str) -> list[dict]:
+def slice_warnings(inspection: dict, decision: RoutingDecision, summary: dict, support: dict, stderr: str, arranged_with_rotation: bool = False) -> list[dict]:
     """Cheap, factual notes for the quote reader. Each names something a human should look at."""
     warnings: list[dict] = []
     if support["supports_used"]:
         warnings.append({"code": "supports_used", "detail": f"Automatic supports add about {support['support_grams']} g of filament."})
+    if arranged_with_rotation:
+        warnings.append({"code": "arranged_with_rotation", "detail": "The part only fits the bed rotated; OrcaSlicer's arranger turned it for this quote and the delivered project applies a controlled 45-degree orientation."})
     dims = sorted(float(value) for value in inspection["dimensions_mm"])
     envelope = sorted(decision.printer.envelope_mm)
     if any(value > 0.9 * limit for value, limit in zip(dims, envelope, strict=True)):
@@ -1130,41 +1191,66 @@ async def slice_model(
             process_path,
             str(material_profile["label"]),
             automatic_supports=True,
+            nozzle_diameter_mm=machine_nozzle_diameter_mm(machine_path),
         )
         env = isolated_orca_env(job)
         # OrcaSlicer 2.5.0 turned the CLI arranger's --allow-rotations default off
         # (2.4.2 had it on). Pass it explicitly from the printer's arrange policy so
         # the quote arranges the way the delivered project does.
         allow_rotations = bool(PROJECT_PRINTERS[selected_printer]["arrange_rotations"])
-        command = [
-            "xvfb-run", "-a", str(ORCA_BIN),
-            "--slice", "0",
-            "--arrange", "1",
-            "--allow-rotations=1" if allow_rotations else "--allow-rotations=0",
-        ]
-        if not preoriented:
-            command.extend(["--orient", "1"])
-        command.extend([
-            "--ensure-on-bed",
-            "--allow-newer-file",
-            "--load-settings", f"{machine_path};{process_path}",
-            "--load-filaments", str(filament_path),
-            "--outputdir", str(output_dir),
-            str(input_path),
-        ])
+
+        def slice_command(rotations: bool) -> list[str]:
+            command = [
+                "xvfb-run", "-a", str(ORCA_BIN),
+                "--slice", "0",
+                "--arrange", "1",
+                "--allow-rotations=1" if rotations else "--allow-rotations=0",
+            ]
+            if not preoriented:
+                command.extend(["--orient", "1"])
+            command.extend([
+                "--ensure-on-bed",
+                "--allow-newer-file",
+                "--load-settings", f"{machine_path};{process_path}",
+                "--load-filaments", str(filament_path),
+                "--outputdir", str(output_dir),
+                str(input_path),
+            ])
+            return command
+
+        def read_engine_result() -> dict | None:
+            result_path = output_dir / "result.json"
+            if not result_path.is_file():
+                return None
+            try:
+                return json.loads(result_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return None
+
+        arranged_with_rotation = False
         try:
             async with NATIVE.reservation(QUEUE_TIMEOUT_SECONDS):
-                completed = await disconnect_guard(request, NATIVE.run(command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
+                completed = await disconnect_guard(request, NATIVE.run(slice_command(allow_rotations), cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
+                engine_result = read_engine_result()
+                if not allow_rotations and orca_found_no_suitable_objects(completed, engine_result) and source_is_rod_like(inspection["dimensions_mm"]):
+                    # The routing rule accepted this part, so it fits the envelope, but
+                    # Orca's arranger keeps the skirt distance plus a 12 mm tree-support
+                    # allowance per side and could not place it axis-aligned: a rod that
+                    # only fits the square bed diagonally, or a tall pin Orca's
+                    # auto-orientation laid down. The project path rescues exactly this
+                    # case, and only for rod-like parts, with a controlled 45-degree
+                    # rotation after export; the quote gets one retry that lets the
+                    # arranger rotate the same parts, so both paths accept the same
+                    # shapes. A broad part that does not fit axis-aligned stays refused
+                    # here as it is refused by the project's layout repair.
+                    arranged_with_rotation = True
+                    shutil.rmtree(output_dir)
+                    output_dir.mkdir()
+                    completed = await disconnect_guard(request, NATIVE.run(slice_command(True), cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
+                    engine_result = read_engine_result()
         except NativeError as exc:
             raise native_error(exc) from exc
 
-        result_path = output_dir / "result.json"
-        engine_result = None
-        if result_path.is_file():
-            try:
-                engine_result = json.loads(result_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                engine_result = None
         if completed.returncode != 0:
             diagnostic = (completed.stderr or completed.stdout or "OrcaSlicer failed")[-2000:]
             raise api_error(422, "SLICE_FAILED", "OrcaSlicer could not slice this model.", engine_result=engine_result, diagnostic=diagnostic)
@@ -1229,7 +1315,7 @@ async def slice_model(
             },
             "toolpath": toolpath,
             "gcode_sha256": hashlib.sha256(gcode.read_bytes()).hexdigest(),
-            "warnings": slice_warnings(inspection, decision, summary, support, completed.stderr),
+            "warnings": slice_warnings(inspection, decision, summary, support, completed.stderr, arranged_with_rotation),
             "notes": [
                 "Sampled preview moves are for visualisation; validate production G-code in OrcaSlicer desktop.",
                 "The quote slices one STL with one material profile per request; printer choice is internal to the workshop.",

@@ -101,3 +101,15 @@ def test_broad_low_part_cannot_use_diagonal_rod_rescue():
     assert result["diagonal45Applied"] is False
     assert result["finalFootprintMm"][0] > 276
     assert result["message"] is None
+
+
+def test_source_is_rod_like_matches_the_controlled_diagonal_policy():
+    from app.fdm_geometry_stability import source_is_rod_like
+
+    assert source_is_rod_like([290, 20, 20]) is True
+    assert source_is_rod_like([20, 20, 350]) is True
+    # A broad plate is not a rod: the project refuses to rotate it and so does the quote.
+    assert source_is_rod_like([280, 100, 10]) is False
+    assert source_is_rod_like([20, 20, 20]) is False
+    assert source_is_rod_like([280, 20]) is False
+    assert source_is_rod_like([280, 0, 20]) is False

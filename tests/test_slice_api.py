@@ -4,6 +4,7 @@ Requests pass through the ApiGuard (authentication, admission, body bounds) and 
 native supervisor (one OrcaSlicer process, containment), exactly as in production.
 """
 
+import json
 import os
 import struct
 import sys
@@ -181,6 +182,83 @@ def test_slice_without_supports_reports_zero_and_warns_near_envelope(client: Tes
     assert body["summary"]["supports_used"] is False and body["summary"]["support_grams"] == 0.0
     assert [item["code"] for item in body["warnings"]] == ["near_envelope_limit", "orca_notice"]
     assert body["warnings"][1]["detail"] == "Warning: something to look at"
+
+
+def read_recorded_invocations(record: Path) -> list[dict]:
+    return [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_slice_hands_orca_an_absolute_first_layer_line_width(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # The committed RatRig profiles say "110%"; Orca's CLI arranger would read that as 110 mm
+    # per skirt loop and refuse any part longer than about 144 mm (exit -50).
+    record = tmp_path / "orca-calls.jsonl"
+    monkeypatch.setenv("FAKE_ORCA_RECORD", str(record))
+    stl = write_box_stl(tmp_path / "bar.stl", 250, 20, 20)
+    response = slice_request(client, stl)
+    assert response.status_code == 200, response.text
+    calls = read_recorded_invocations(record)
+    assert len(calls) == 1
+    assert calls[0]["process"]["initial_layer_line_width"] == "0.44"
+    assert calls[0]["process"]["line_width"] == "110%"
+    assert "--allow-rotations=0" in calls[0]["argv"] and "--orient" in calls[0]["argv"]
+    assert [item["code"] for item in response.json()["warnings"]] == ["supports_used"]
+
+
+def test_slice_retries_once_with_rotations_when_the_arranger_places_nothing(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # A rod that only fits the square bed diagonally: the axis-aligned arrange ends with
+    # Orca's -50, the one retry lets the arranger rotate, and the quote says so.
+    record = tmp_path / "orca-calls.jsonl"
+    monkeypatch.setenv("FAKE_ORCA_RECORD", str(record))
+    monkeypatch.setenv("FAKE_ORCA_NO_OBJECTS_WITHOUT_ROTATIONS", "1")
+    stl = write_box_stl(tmp_path / "rod.stl", 20, 20, 350)
+    response = slice_request(client, stl, preoriented="true")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [item["code"] for item in body["warnings"]] == ["supports_used", "arranged_with_rotation", "near_envelope_limit"]
+    assert body["summary"]["filament_grams"] == 12.5
+    calls = read_recorded_invocations(record)
+    assert [("--allow-rotations=1" in call["argv"]) for call in calls] == [False, True]
+    # Only the rotation flag changes between the two runs.
+    assert [arg for arg in calls[0]["argv"] if not arg.startswith("--allow-rotations")] == [arg for arg in calls[1]["argv"] if not arg.startswith("--allow-rotations")]
+    assert all("--orient" not in call["argv"] for call in calls)
+    assert main.NATIVE._slot.locked() is False
+
+
+def test_slice_does_not_rotate_a_broad_part_the_project_would_refuse(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # 280 x 100 x 10 passes routing standing on its edge, Orca lays it flat, and the project's
+    # layout repair refuses it because only rod-like parts may rotate. The quote keeps the same
+    # policy: no rotation retry, so the arranger's -50 stays a SLICE_FAILED.
+    record = tmp_path / "orca-calls.jsonl"
+    monkeypatch.setenv("FAKE_ORCA_RECORD", str(record))
+    monkeypatch.setenv("FAKE_ORCA_NO_OBJECTS_WITHOUT_ROTATIONS", "1")
+    stl = write_box_stl(tmp_path / "broad.stl", 280, 100, 10)
+    response = slice_request(client, stl)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "SLICE_FAILED" and detail["engine_result"]["return_code"] == -50
+    assert "pass --allow-rotations" in detail["diagnostic"]
+    assert len(read_recorded_invocations(record)) == 1
+
+
+def test_slice_does_not_retry_other_engine_failures(client: TestClient, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    record = tmp_path / "orca-calls.jsonl"
+    monkeypatch.setenv("FAKE_ORCA_RECORD", str(record))
+    monkeypatch.setenv("FAKE_ORCA_FAIL", "1")
+    stl = write_box_stl(tmp_path / "bar.stl", 250, 20, 20)
+    response = slice_request(client, stl)
+    assert response.status_code == 422 and response.json()["detail"]["code"] == "SLICE_FAILED"
+    assert len(read_recorded_invocations(record)) == 1
+
+
+def test_orca_no_suitable_objects_detection():
+    import subprocess
+
+    failed = subprocess.CompletedProcess(args=[], returncode=206, stdout="", stderr="")
+    assert main.orca_found_no_suitable_objects(failed, {"return_code": -50}) is True
+    assert main.orca_found_no_suitable_objects(failed, None) is True
+    assert main.orca_found_no_suitable_objects(failed, {"return_code": 1}) is False
+    assert main.orca_found_no_suitable_objects(subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=""), None) is False
+    assert main.orca_found_no_suitable_objects(subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""), {"return_code": -50}) is False
 
 
 def test_slice_preview_none_skips_the_toolpath_sample(client: TestClient, fake_orca, tmp_path: Path):
