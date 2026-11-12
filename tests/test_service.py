@@ -17,7 +17,12 @@ def test_process_profile_maps_quality_and_strength(tmp_path: Path):
 def test_resolved_profile_matrix():
     profile_root = Path(__file__).parents[1] / "profiles"
     machine = json.loads((profile_root / "machine.json").read_text(encoding="utf-8"))
-    assert machine["inherits"] == "RatRig V-Core 3 300 0.4 nozzle"
+    assert machine["name"] == "RatRig V-Core 3 300 0.4 nozzle - Copy"
+    assert machine["printer_settings_id"] == machine["name"]
+    assert machine["printer_model"] == "RatRig V-Core 3 300"
+    assert machine["from"] == "user"
+    # OrcaSlicer 2.5.0 ignores silent_mode; the dual machine_max_* limits stay.
+    assert "silent_mode" not in machine
     expected = {
         profile_root / "machine.json": "machine",
         **{profile_root / "process" / f"{name}.json": "process" for name in ("pla", "petg", "pctg", "abs", "tpu")},
@@ -26,9 +31,20 @@ def test_resolved_profile_matrix():
     for path, profile_type in expected.items():
         profile = json.loads(path.read_text(encoding="utf-8"))
         assert profile["type"] == profile_type
-        assert profile["inherits"]
+        # Flattened profiles: OrcaSlicer 2.5.0's CLI resolves `inherits` against an
+        # installed vendor tree the isolated container never has, so none may inherit.
+        assert "inherits" not in profile, path
         if profile_type in {"process", "filament"}:
-            assert machine["inherits"] in profile["compatible_printers"]
+            # Without `inherits`, the 2.5.0 CLI compares a reopened project's
+            # compatible_printers against the embedded machine's own name.
+            assert profile["compatible_printers"] == [machine["name"]]
+        if profile_type == "process":
+            # 2.5.0 enum value; 2.4.2 used "0".
+            assert profile["enable_arc_fitting"] == "disabled"
+        if profile_type == "filament":
+            # 2.4.2 filled this from the parent chain; the 2.5.0 CLI dereferences it
+            # without a default and segfaults when it is missing.
+            assert profile["filament_diameter"] == ["1.75"]
 
 
 def test_duration_parser():

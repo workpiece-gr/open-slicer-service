@@ -65,6 +65,9 @@ def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Pa
     assert sum(str(value).endswith(".stl") for value in export) == 6
     assert "--orient" in export
     assert "--arrange" in export
+    # Explicit on both Orca versions: 2.4.2 defaulted to rotations on, 2.5.0 to off.
+    assert "--allow-rotations=1" in export
+    assert "--allow-rotations=0" not in export
     assert "--assemble" not in export
 
     single = build_project_command(
@@ -101,6 +104,7 @@ def test_project_commands_separate_editable_export_from_fresh_slice(tmp_path: Pa
         allow_arrange_rotations=False,
     )
     assert "--allow-rotations=0" in no_rotate
+    assert "--allow-rotations=1" not in no_rotate
     assert "--allow-rotations" not in no_rotate
 
     verify = verify_project_command(

@@ -2,7 +2,6 @@
   "type": "machine",
   "name": "RatRig V-Core 3 300 0.4 nozzle - Copy",
   "from": "user",
-  "inherits": "RatRig V-Core 3 300 0.4 nozzle",
   "instantiation": "true",
   "printer_technology": "FFF",
   "deretraction_speed": [
@@ -15,7 +14,6 @@
     "0x0"
   ],
   "gcode_flavor": "klipper",
-  "silent_mode": "0",
   "machine_max_acceleration_e": [
     "5000",
     "5000"

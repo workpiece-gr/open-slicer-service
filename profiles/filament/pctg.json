@@ -2,7 +2,6 @@
   "type": "filament",
   "name": "Open Slicer PCTG",
   "from": "user",
-  "inherits": "Generic ABS @System",
   "instantiation": "true",
   "cool_plate_temp": [
     "105"
@@ -42,6 +41,9 @@
   ],
   "filament_type": [
     "PETG"
+  ],
+  "filament_diameter": [
+    "1.75"
   ],
   "filament_density": [
     "1.25"
@@ -89,7 +91,7 @@
   "setting_id": "W0LP8Ah5MHMzogvV",
   "filament_id": "OGFB99",
   "compatible_printers": [
-    "RatRig V-Core 3 300 0.4 nozzle"
+    "RatRig V-Core 3 300 0.4 nozzle - Copy"
   ],
   "filament_end_gcode": [
     "; filament end gcode\nSET_FAN_SPEED FAN=bentobox SPEED=0"

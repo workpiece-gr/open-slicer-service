@@ -2,7 +2,6 @@
   "type": "filament",
   "name": "Open Slicer PETG",
   "from": "user",
-  "inherits": "Generic PETG @System",
   "instantiation": "true",
   "cool_plate_temp": [
     "60"
@@ -42,6 +41,9 @@
   ],
   "filament_type": [
     "PETG"
+  ],
+  "filament_diameter": [
+    "1.75"
   ],
   "filament_density": [
     "1.25"
@@ -83,7 +85,7 @@
   "setting_id": "YiQZfhL6hH0giSHL",
   "filament_id": "OGFG99",
   "compatible_printers": [
-    "RatRig V-Core 3 300 0.4 nozzle"
+    "RatRig V-Core 3 300 0.4 nozzle - Copy"
   ],
   "dont_slow_down_outer_wall": [
     "1"
