@@ -11,7 +11,12 @@ It understands only the argument shapes app.main produces:
 
 Environment switches: FAKE_ORCA_SLEEP (seconds), FAKE_ORCA_FAIL (non-empty →
 exit 1 with a diagnostic), FAKE_ORCA_STDERR (text echoed to stderr),
-FAKE_ORCA_NO_SUPPORT (non-empty → no support extrusion).
+FAKE_ORCA_NO_SUPPORT (non-empty → no support extrusion),
+FAKE_ORCA_RECORD (path → one JSON line per invocation with argv and the loaded
+process profile, which the job directory deletes before a test can read it),
+FAKE_ORCA_NO_OBJECTS_WITHOUT_ROTATIONS (non-empty → a slice with
+--allow-rotations=0 ends like the real arranger that could not place a long part:
+result.json return_code -50 and exit status 206).
 """
 
 import json
@@ -55,13 +60,44 @@ G1 X0 Y0 E0.5
 """
 
 
+NO_SUITABLE_OBJECTS = -50
+NO_SUITABLE_OBJECTS_MESSAGE = (
+    "No object is fully inside the print volume. Arrange ran without rotations."
+    " If an object only fits the bed when rotated, pass --allow-rotations."
+    " Otherwise the plate is empty or an object is larger than the printable area or height."
+)
+
+
+def record_invocation(argv: list[str]) -> None:
+    record = os.environ.get("FAKE_ORCA_RECORD")
+    if not record:
+        return
+    process = None
+    if "--load-settings" in argv:
+        for setting in argv[argv.index("--load-settings") + 1].split(";"):
+            try:
+                loaded = json.loads(Path(setting).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if loaded.get("type") == "process":
+                process = loaded
+    with Path(record).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"argv": argv, "process": process}) + "\n")
+
+
 def main(argv: list[str]) -> int:
+    record_invocation(argv)
     sleep = float(os.environ.get("FAKE_ORCA_SLEEP", "0") or 0)
     if sleep:
         time.sleep(sleep)
     if os.environ.get("FAKE_ORCA_STDERR"):
         print(os.environ["FAKE_ORCA_STDERR"], file=sys.stderr)
     output_dir = Path(argv[argv.index("--outputdir") + 1]) if "--outputdir" in argv else None
+    if os.environ.get("FAKE_ORCA_NO_OBJECTS_WITHOUT_ROTATIONS") and "--slice" in argv and "--allow-rotations=0" in argv and output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "result.json").write_text(json.dumps({"return_code": NO_SUITABLE_OBJECTS, "error_string": NO_SUITABLE_OBJECTS_MESSAGE, "plate_index": 1}))
+        print(f"plate 1: {NO_SUITABLE_OBJECTS_MESSAGE}", file=sys.stderr)
+        return NO_SUITABLE_OBJECTS & 0xFF
     if os.environ.get("FAKE_ORCA_FAIL"):
         if output_dir:
             output_dir.mkdir(parents=True, exist_ok=True)

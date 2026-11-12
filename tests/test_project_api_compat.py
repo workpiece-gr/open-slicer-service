@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from app.native_supervisor import NativeError
-from tests.test_slice_api import auth, fake_orca, write_box_stl  # noqa: F401 - fixtures
+from tests.test_slice_api import auth, fake_orca, read_recorded_invocations, write_box_stl  # noqa: F401 - fixtures
 
 
 @pytest.fixture
@@ -139,3 +139,20 @@ def test_project_slice_failure_and_timeout_are_coded_and_release_the_slot(projec
     timed_out = project_request(project_client, stl)
     assert timed_out.status_code == 504 and timed_out.json()["detail"]["code"] == "SLICE_TIMEOUT"
     assert main.NATIVE._slot.locked() is False and main.NATIVE.poisoned is False
+
+
+def test_project_process_profile_matches_the_quote_width_resolution(project_client, fake_orca, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # The export and the fresh-process verification both see the millimetre first-layer width
+    # the quote slices with, so a quoted long part and its delivered project agree.
+    record = tmp_path / "orca-calls.jsonl"
+    monkeypatch.setenv("FAKE_ORCA_RECORD", str(record))
+    stl = write_box_stl(tmp_path / "bar.stl", 250, 20, 20)
+    response = project_request(project_client, stl, quantity="1")
+    assert response.status_code == 200, response.text
+    calls = read_recorded_invocations(record)
+    assert [("--export-3mf" in call["argv"]) for call in calls] == [True, False]
+    export_process = calls[0]["process"]
+    assert export_process["initial_layer_line_width"] == "0.44"
+    assert export_process["enable_prime_tower"] == "0"
+    assert "G92 E0" in export_process["layer_change_gcode"]
+    assert "--allow-rotations=0" in calls[0]["argv"] and "--assemble" in calls[0]["argv"]

@@ -1,7 +1,16 @@
 import json
 from pathlib import Path
 
-from app.main import build_process_profile, parse_duration_seconds, parse_gcode_summary, sample_toolpath
+import pytest
+
+from app.main import (
+    absolute_first_layer_line_width,
+    build_process_profile,
+    machine_nozzle_diameter_mm,
+    parse_duration_seconds,
+    parse_gcode_summary,
+    sample_toolpath,
+)
 
 
 def test_process_profile_maps_quality_and_strength(tmp_path: Path):
@@ -12,6 +21,62 @@ def test_process_profile_maps_quality_and_strength(tmp_path: Path):
     assert result["layer_height"] == "0.12"
     assert result["wall_loops"] == "5"
     assert result["sparse_infill_density"] == "20%"
+
+
+def test_first_layer_line_width_percentage_becomes_millimetres_for_the_arranger():
+    # OrcaSlicer's CLI arranger reads a "110%" first-layer width as 110 mm per skirt loop and
+    # shrinks the arrange bed by 222 mm per side, so the generated process states the same
+    # width in millimetres. Absolute widths are left alone.
+    assert absolute_first_layer_line_width({"initial_layer_line_width": "110%"}, 0.4) == "0.44"
+    assert absolute_first_layer_line_width({"initial_layer_line_width": "100%"}, 0.6) == "0.6"
+    assert absolute_first_layer_line_width({"initial_layer_line_width": "0.42"}, 0.4) is None
+    # Orca falls back to line_width when the first-layer width is unset or zero.
+    assert absolute_first_layer_line_width({"initial_layer_line_width": "0", "line_width": "125%"}, 0.4) == "0.5"
+    assert absolute_first_layer_line_width({"line_width": "0.45"}, 0.4) is None
+    assert absolute_first_layer_line_width({}, 0.4) is None
+    with pytest.raises(RuntimeError):
+        absolute_first_layer_line_width({"initial_layer_line_width": "-5%"}, 0.4)
+    with pytest.raises(RuntimeError):
+        absolute_first_layer_line_width({"initial_layer_line_width": "abc%"}, 0.4)
+
+
+def test_process_profile_resolves_percentage_width_against_the_machine_nozzle(tmp_path: Path):
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps({"type": "process", "name": "Base", "initial_layer_line_width": "110%", "line_width": "110%"}))
+    machine = tmp_path / "machine.json"
+    machine.write_text(json.dumps({"type": "machine", "nozzle_diameter": ["0.4"]}))
+    nozzle = machine_nozzle_diameter_mm(machine)
+    assert nozzle == 0.4
+    result = build_process_profile(base, "balanced", "functional", tmp_path / "effective.json", nozzle_diameter_mm=nozzle)
+    assert result["initial_layer_line_width"] == "0.44"
+    # Every other width keeps its calibrated percentage form.
+    assert result["line_width"] == "110%"
+    # Without a nozzle the profile is copied unchanged (legacy callers).
+    untouched = build_process_profile(base, "balanced", "functional", tmp_path / "legacy.json")
+    assert untouched["initial_layer_line_width"] == "110%"
+
+
+def test_machine_nozzle_diameter_refuses_unusable_profiles(tmp_path: Path):
+    for payload in ({}, {"nozzle_diameter": []}, {"nozzle_diameter": ["0"]}, {"nozzle_diameter": ["nan"]}, {"nozzle_diameter": "x"}):
+        machine = tmp_path / "machine.json"
+        machine.write_text(json.dumps(payload))
+        with pytest.raises(RuntimeError):
+            machine_nozzle_diameter_mm(machine)
+    machine = tmp_path / "machine.json"
+    machine.write_text(json.dumps({"nozzle_diameter": "0.6"}))
+    assert machine_nozzle_diameter_mm(machine) == 0.6
+
+
+def test_committed_ratrig_profiles_need_the_width_resolution():
+    # Names the failure mode the resolution guards: every committed RatRig process profile
+    # states its first-layer width as a percentage, which the Orca CLI arranger misreads.
+    profile_root = Path(__file__).parents[1] / "profiles"
+    nozzle = machine_nozzle_diameter_mm(profile_root / "machine.json")
+    assert nozzle == 0.4
+    for name in ("pla", "petg", "pctg", "abs", "tpu"):
+        profile = json.loads((profile_root / "process" / f"{name}.json").read_text(encoding="utf-8"))
+        assert profile["initial_layer_line_width"].endswith("%"), name
+        assert absolute_first_layer_line_width(profile, nozzle) == "0.44", name
 
 
 def test_resolved_profile_matrix():

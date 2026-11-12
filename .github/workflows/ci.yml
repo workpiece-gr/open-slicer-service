@@ -73,6 +73,9 @@ jobs:
       - name: Verify controlled orientation with real Orca
         run: python tests/controlled_orientation_http_probe.py
 
+      - name: Quote long parts through /v1/slice with real Orca
+        run: python tests/slice_long_parts_http_probe.py
+
       - name: Generate integration STL fixtures
         run: |
           python - <<'PY'

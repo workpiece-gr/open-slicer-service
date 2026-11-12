@@ -103,6 +103,18 @@ def _rod_like(dims: Sequence[float]) -> bool:
     return ordered[2] / max(ordered[1], _EPS) >= ROD_ASPECT_RATIO
 
 
+def source_is_rod_like(dimensions_mm: Sequence[float]) -> bool:
+    """The one shape class this policy lets rotate on the bed: a source envelope whose
+    longest side is at least ROD_ASPECT_RATIO times its middle side. The quote path uses
+    it to decide whether Orca's arranger may rotate a part that did not fit axis-aligned."""
+    if len(dimensions_mm) != 3:
+        return False
+    part = [float(value) for value in dimensions_mm]
+    if any(not math.isfinite(value) or value <= 0 for value in part):
+        return False
+    return _rod_like(part)
+
+
 def _round_dims(dims: Sequence[float]) -> list[float]:
     return [round(float(value), 6) for value in dims]
 
