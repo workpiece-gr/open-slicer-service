@@ -20,7 +20,7 @@ Public without a token: `/` (AGPL information), `/source` (the source offer) and
 
 - **Source:** this public GitHub repository, with `SOURCE_CODE_URL` pointing to the deployed source for AGPL compliance and `SOURCE_COMMIT_SHA` set to the exact 40-hex commit of the running image.
 - **Target host:** the Workpiece-owned Linux server; the container binds to loopback only and is launched by the website repository's manufacturing-service runbook (`scripts/run-manufacturing-container.sh`, systemd unit, cgroup slice).
-- **Slicer:** OrcaSlicer 2.4.2, with the base-image digest and downloaded AppImage SHA-256 pinned in `Dockerfile`.
+- **Slicer:** OrcaSlicer 2.5.0 (`OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.0.AppImage`), with the base-image digest and downloaded AppImage SHA-256 pinned in `Dockerfile`. The profiles in `profiles/` are fully flattened and carry no `inherits`: the 2.5.0 CLI resolves `inherits` against an installed vendor tree that the isolated per-request data directory never has (see `profiles/README.md`).
 
 The service image is separate from the immutable qualified Authority-v2 image. A source rebuild must retain its own image digest; a matching Git commit or label alone does not prove identical runtime bytes.
 
@@ -31,7 +31,7 @@ The service image is separate from the immutable qualified Authority-v2 image. A
 | Key | State | Envelope | Profiles |
 | --- | --- | --- | --- |
 | `ratrig_vcore3_300` | enabled, calibrated | 300 × 300 × 300 mm, controlled 45-degree rod-fit check | `profiles/machine.json`, `profiles/process/*.json`, `profiles/filament/*.json` (RatRig V-Core 3 300 / 0.4 mm bundle) |
-| `ender3_generic_235` | present, **disabled**, not calibrated | 235 × 235 × 235 mm | OrcaSlicer 2.4.2's bundled generic Creality Ender-3 0.4 mm presets with only the envelope overridden; a real future workshop printer that waits for a calibrated profile set |
+| `ender3_generic_235` | present, **disabled**, not calibrated | 235 × 235 × 235 mm | Was OrcaSlicer 2.4.2's bundled generic Creality Ender-3 0.4 mm presets with only the envelope overridden. OrcaSlicer 2.5.0 ships vendor presets only as binary `<Vendor>.opc` caches, so those JSON files no longer exist in the image and `/health` reports `project_3mf.ender_generic_profiles_ready: false`; a real future workshop printer that waits for a committed, calibrated profile set |
 
 Routing (`routing.rule = smallest_capable`): with `printer=auto` the request goes to the smallest enabled printer whose material list and fit rule accept the part; ties break by envelope volume, then key. A disabled printer is never a candidate, even when requested explicitly (`PRINTER_DISABLED`). When the Ender is enabled later, small parts route to it and large ones to the RatRig; `GET /v1/printers` and `/health` show the list.
 

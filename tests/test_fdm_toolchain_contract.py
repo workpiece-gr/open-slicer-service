@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 
@@ -20,9 +21,19 @@ def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
     assert "COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-evidence.json ./fdm-machine-qualification-evidence.bin" in authority
     assert "ARG TOOLCHAIN_IMAGE=" not in live
     assert f"FROM {toolchain['base_image']['reference']}" in live
-    assert toolchain["orca"]["version"] in live
-    assert toolchain["orca"]["asset"] in live
-    assert toolchain["orca"]["asset_sha256"] in live
+    # The live service moved to OrcaSlicer 2.5.0 while the published authority
+    # toolchain record stays at the version it was published with, so the live
+    # Dockerfile is no longer required to pin the lock's Orca asset. It must still
+    # pin one exact Orca release consistently: label, ENV, download URL, asset name
+    # and verified SHA-256 all name the same version and digest.
+    version = re.search(r'workpiece\.orcaslicer\.version="([0-9]+\.[0-9]+\.[0-9]+)"', live).group(1)
+    digest = re.search(r'workpiece\.orcaslicer\.asset\.sha256="([0-9a-f]{64})"', live).group(1)
+    asset = f"OrcaSlicer_Linux_AppImage_Ubuntu2404_V{version}.AppImage"
+    assert f"ORCA_VERSION={version}" in live
+    assert f"https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v{version}/{asset}" in live
+    assert f'echo "{digest}  /tmp/orca.AppImage" | sha256sum -c -' in live
+    assert live.count("OrcaSlicer_Linux_AppImage_Ubuntu2404_V") == 1
+    assert len(re.findall(r"[0-9a-f]{64}", live.replace(toolchain["base_image"]["reference"], ""))) == 2
     assert "sha256sum -c -" in live
     arg_lines = [
         line.strip()

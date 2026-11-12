@@ -2,7 +2,6 @@
   "type": "filament",
   "name": "Open Slicer TPU",
   "from": "user",
-  "inherits": "RatRig Generic TPU",
   "instantiation": "true",
   "cool_plate_temp": [
     "30"
@@ -36,6 +35,9 @@
   ],
   "filament_type": [
     "TPU"
+  ],
+  "filament_diameter": [
+    "1.75"
   ],
   "filament_density": [
     "1.24"
@@ -97,7 +99,7 @@
     "0.2"
   ],
   "compatible_printers": [
-    "RatRig V-Core 3 300 0.4 nozzle"
+    "RatRig V-Core 3 300 0.4 nozzle - Copy"
   ],
   "filament_settings_id": [
     "SHIRT TPU"

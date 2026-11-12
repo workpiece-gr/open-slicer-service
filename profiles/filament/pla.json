@@ -2,7 +2,6 @@
   "type": "filament",
   "name": "Open Slicer PLA",
   "from": "user",
-  "inherits": "Generic PLA @System",
   "instantiation": "true",
   "fan_cooling_layer_time": [
     "100"
@@ -12,6 +11,9 @@
   ],
   "filament_type": [
     "PLA"
+  ],
+  "filament_diameter": [
+    "1.75"
   ],
   "filament_density": [
     "1.24"
@@ -94,7 +96,7 @@
   "renamed_from": "My Generic PLA",
   "setting_id": "RcBNzytWgwRrwXXz",
   "compatible_printers": [
-    "RatRig V-Core 3 300 0.4 nozzle"
+    "RatRig V-Core 3 300 0.4 nozzle - Copy"
   ],
   "dont_slow_down_outer_wall": [
     "1"

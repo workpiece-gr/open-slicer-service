@@ -45,7 +45,7 @@ STRENGTH = {
     "load_bearing": {"label": "Load bearing", "wall_loops": "5"},
 }
 
-ORCA_VERSION = os.getenv("ORCA_VERSION", "2.4.2")
+ORCA_VERSION = os.getenv("ORCA_VERSION", "2.5.0")
 ORCA_BIN = Path(os.getenv("ORCA_BIN", "/opt/orca/squashfs-root/AppRun"))
 PROFILE_ROOT = Path(os.getenv("PROFILE_ROOT", "/app/profiles"))
 SOURCE_CODE_URL = os.getenv("SOURCE_CODE_URL", "")
@@ -107,6 +107,11 @@ for material_key, material_profile in MATERIALS.items():
     PROFILE_FILES[f"{material_key}_process"] = material_profile["process"]
     PROFILE_FILES[f"{material_key}_filament"] = material_profile["filament"]
 
+# Disabled Ender 3: these are the loose vendor JSON files OrcaSlicer 2.4.2 shipped
+# under resources/profiles. OrcaSlicer 2.5.0 ships vendor presets only as binary
+# <Vendor>.opc caches, so these paths do not exist in the pinned image,
+# ender_generic_profiles_ready() reports false and the printer cannot be enabled
+# until the owner commits a calibrated Ender 3 profile set (printers.json note).
 ENDER_GENERIC_ROOT = ORCA_RESOURCE_ROOT / "Creality"
 ENDER_GENERIC_MACHINE = ENDER_GENERIC_ROOT / "machine" / "Creality Ender-3 0.4 nozzle.json"
 ENDER_GENERIC_PROCESS = ENDER_GENERIC_ROOT / "process" / "0.20mm Standard @Creality Ender3 0.4.json"
@@ -420,10 +425,10 @@ def build_process_profile(
         # outside the printable area on a 300 mm RatRig bed.
         profile["enable_prime_tower"] = "0"
     if project_reopen_safe:
-        # OrcaSlicer 2.4.2 validates reopened project 3MFs more strictly than
-        # the initial export. With relative extrusion on Marlin it requires an
-        # exact uppercase G92 E0 in before_layer_change_gcode or
-        # layer_change_gcode. Use the latter and preserve any existing script.
+        # OrcaSlicer (seen with 2.4.2, kept for 2.5.0) validates reopened project
+        # 3MFs more strictly than the initial export. With relative extrusion on
+        # Marlin it requires an exact uppercase G92 E0 in before_layer_change_gcode
+        # or layer_change_gcode. Use the latter and preserve any existing script.
         layer_change_gcode = str(profile.get("layer_change_gcode") or "")
         if "G92 E0" not in layer_change_gcode:
             profile["layer_change_gcode"] = (layer_change_gcode.rstrip() + "\nG92 E0").lstrip()
@@ -840,13 +845,14 @@ async def build_project(
             sources=instance_paths,
             project_path=project_path,
             # Keep Orca's 3D auto-orientation. For RatRig, deterministic
-            # post-export layout repair fixes the known 2.4.2 CLI placement
-            # defect while preserving Orca's selected orientation matrix.
+            # post-export layout repair fixes the CLI placement defect seen with
+            # 2.4.2 while preserving Orca's selected orientation matrix.
             auto_orient=True,
             # Do not let the RatRig arranger add arbitrary Z rotations. The
-            # 2.4.2 CLI has produced wasteful 45-degree placement for long
+            # 2.4.2 CLI produced wasteful 45-degree placement for long
             # rectangular parts here. Controlled +/-45-degree rescue now
             # happens after export only when geometry/bed fit requires it.
+            # The flag is always explicit because 2.5.0 flipped its default.
             allow_arrange_rotations=bool(printer_record["arrange_rotations"]),
         )
         await disconnect_guard(request, run_native(export_command, cwd=job, timeout=SLICE_TIMEOUT_SECONDS, env=env))
@@ -1126,10 +1132,15 @@ async def slice_model(
             automatic_supports=True,
         )
         env = isolated_orca_env(job)
+        # OrcaSlicer 2.5.0 turned the CLI arranger's --allow-rotations default off
+        # (2.4.2 had it on). Pass it explicitly from the printer's arrange policy so
+        # the quote arranges the way the delivered project does.
+        allow_rotations = bool(PROJECT_PRINTERS[selected_printer]["arrange_rotations"])
         command = [
             "xvfb-run", "-a", str(ORCA_BIN),
             "--slice", "0",
             "--arrange", "1",
+            "--allow-rotations=1" if allow_rotations else "--allow-rotations=0",
         ]
         if not preoriented:
             command.extend(["--orient", "1"])

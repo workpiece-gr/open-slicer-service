@@ -209,7 +209,7 @@ def repair_project_plate_layout(
     margin_mm: float = DEFAULT_MARGIN_MM,
     gap_mm: float = 8.0,
 ) -> dict:
-    """Repair Orca 2.4.2 placement and apply only controlled stability rotations."""
+    """Repair Orca CLI placement (defect seen with 2.4.2, repair kept for 2.5.0) and apply only controlled stability rotations."""
     if not zipfile.is_zipfile(path):
         raise ValueError("Cannot repair layout in a non-3MF archive.")
 
@@ -484,26 +484,30 @@ def build_project_command(
 ) -> list[str]:
     if not sources:
         raise ValueError("At least one STL source is required.")
-    # OrcaSlicer 2.4.2 rejects --repetitions when plate_to_slice is 0, which is
+    # OrcaSlicer 2.4.2 rejected --repetitions when plate_to_slice is 0, which is
     # exactly the mode needed for an unsliced editable project export. Supplying
     # one STL path per ordered instance avoids coupling project creation to
     # --slice and keeps the output editable instead of producing .gcode.3mf.
+    # OrcaSlicer 2.5.0 flipped the CLI default of --allow-rotations from on to
+    # off, so the flag is always passed explicitly and the arranger's rotation
+    # policy comes from printers.json, not from the Orca version.
     command = [
         "xvfb-run", "-a", str(orca_bin),
         "--arrange", "1",
-        *([] if allow_arrange_rotations else ["--allow-rotations=0"]),
+        "--allow-rotations=1" if allow_arrange_rotations else "--allow-rotations=0",
         *(["--orient", "1"] if auto_orient else ["--orient", "0"]),
         "--ensure-on-bed",
         "--allow-newer-file",
         "--load-settings", f"{machine_profile};{process_profile}",
         "--load-filaments", str(filament_profile),
     ]
-    # OrcaSlicer 2.4.2 can export a lone STL without assigning its only
+    # OrcaSlicer 2.4.2 could export a lone STL without assigning its only
     # instance to a printable plate for some user machine profiles (observed
     # with the RatRig profile). Reopening that otherwise valid project then
-    # fails with CLI_NO_SUITABLE_OBJECTS. --assemble rebuilds the single model
+    # failed with CLI_NO_SUITABLE_OBJECTS. --assemble rebuilds the single model
     # with an explicit instance before the arrange/export pass, while keeping
-    # one build item and the same mesh geometry.
+    # one build item and the same mesh geometry. Kept unchanged on 2.5.0, where
+    # the single-STL export and reopen were re-verified with it in place.
     if len(sources) == 1:
         command.append("--assemble")
     command.extend(

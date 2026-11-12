@@ -29,7 +29,7 @@
       "profile_source": "orca_bundled_creality_generic",
       "arrange_rotations": true,
       "layout_repair": false,
-      "note": "Real future workshop printer. Present but disabled: its profile is OrcaSlicer's bundled generic Creality Ender-3 preset with only the envelope overridden and is not calibrated. The service refuses to start if a printer is enabled without calibrated=true, so this profile can never produce a live quote or project until the owner supplies a calibrated profile set and flips both flags. Confirm the real Z height (235 vs 250 mm) before enabling."
+      "note": "Real future workshop printer. Present but disabled: its profile source was OrcaSlicer 2.4.2's bundled generic Creality Ender-3 preset JSON with only the envelope overridden and is not calibrated. OrcaSlicer 2.5.0 ships vendor presets only as binary <Vendor>.opc caches, so that source does not exist in the pinned image. The service refuses to start if a printer is enabled without calibrated=true, so this profile can never produce a live quote or project until the owner commits a calibrated profile set under profiles/ and flips both flags. Confirm the real Z height (235 vs 250 mm) before enabling."
     }
   }
 }
