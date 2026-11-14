@@ -21,7 +21,7 @@ def test_authority_runtime_is_parallel_to_existing_live_dockerfile():
     assert "COPY qualification/ratrig_vcore3_300/ratrig-pla-balanced-functional-qualification-evidence.json ./fdm-machine-qualification-evidence.bin" in authority
     assert "ARG TOOLCHAIN_IMAGE=" not in live
     assert f"FROM {toolchain['base_image']['reference']}" in live
-    # The live service moved to OrcaSlicer 2.5.0 while the published authority
+    # The live service moved to OrcaSlicer 2.5.0 and then 2.5.1 while the published authority
     # toolchain record stays at the version it was published with, so the live
     # Dockerfile is no longer required to pin the lock's Orca asset. It must still
     # pin one exact Orca release consistently: label, ENV, download URL, asset name
@@ -83,3 +83,13 @@ def test_final_service_lock_is_published_and_binds_exact_published_toolchain():
 
 
 
+
+
+def test_live_dockerfile_pins_orcaslicer_2_5_1_and_its_asset_digest():
+    # OrcaSlicer 2.5.1 (maintenance release of 2026-11-14), official AppImage, SHA-256 computed from the downloaded file
+    # (it equals the digest GitHub shows for the release asset). A future version bump changes this test on purpose.
+    live = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert 'workpiece.orcaslicer.version="2.5.1"' in live
+    assert 'workpiece.orcaslicer.asset.sha256="073b8105c928356141db0ddbce88b81d52c7a9e2442f9baae0a9089c89ff04eb"' in live
+    assert "ORCA_VERSION=2.5.1" in live
+    assert "2.5.0" not in live

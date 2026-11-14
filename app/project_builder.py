@@ -506,7 +506,7 @@ def build_project_command(
     # with the RatRig profile). Reopening that otherwise valid project then
     # failed with CLI_NO_SUITABLE_OBJECTS. --assemble rebuilds the single model
     # with an explicit instance before the arrange/export pass, while keeping
-    # one build item and the same mesh geometry. Kept unchanged on 2.5.0, where
+    # one build item and the same mesh geometry. Kept unchanged on 2.5.0 and 2.5.1, where
     # the single-STL export and reopen were re-verified with it in place.
     if len(sources) == 1:
         command.append("--assemble")

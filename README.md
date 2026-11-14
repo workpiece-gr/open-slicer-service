@@ -20,7 +20,7 @@ Public without a token: `/` (AGPL information), `/source` (the source offer) and
 
 - **Source:** this public GitHub repository, with `SOURCE_CODE_URL` pointing to the deployed source for AGPL compliance and `SOURCE_COMMIT_SHA` set to the exact 40-hex commit of the running image.
 - **Target host:** the Workpiece-owned Linux server; the container binds to loopback only and is launched by the website repository's manufacturing-service runbook (`scripts/run-manufacturing-container.sh`, systemd unit, cgroup slice).
-- **Slicer:** OrcaSlicer 2.5.0 (`OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.0.AppImage`), with the base-image digest and downloaded AppImage SHA-256 pinned in `Dockerfile`. The profiles in `profiles/` are fully flattened and carry no `inherits`: the 2.5.0 CLI resolves `inherits` against an installed vendor tree that the isolated per-request data directory never has (see `profiles/README.md`).
+- **Slicer:** OrcaSlicer 2.5.1 (`OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.1.AppImage`), with the base-image digest and downloaded AppImage SHA-256 pinned in `Dockerfile`. The profiles in `profiles/` are fully flattened and carry no `inherits`: the 2.5.0 CLI resolves `inherits` against an installed vendor tree that the isolated per-request data directory never has (see `profiles/README.md`).
 
 The service image is separate from the immutable qualified Authority-v2 image. A source rebuild must retain its own image digest; a matching Git commit or label alone does not prove identical runtime bytes.
 
