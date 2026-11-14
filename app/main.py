@@ -46,7 +46,7 @@ STRENGTH = {
     "load_bearing": {"label": "Load bearing", "wall_loops": "5"},
 }
 
-ORCA_VERSION = os.getenv("ORCA_VERSION", "2.5.0")
+ORCA_VERSION = os.getenv("ORCA_VERSION", "2.5.1")
 ORCA_BIN = Path(os.getenv("ORCA_BIN", "/opt/orca/squashfs-root/AppRun"))
 PROFILE_ROOT = Path(os.getenv("PROFILE_ROOT", "/app/profiles"))
 SOURCE_CODE_URL = os.getenv("SOURCE_CODE_URL", "")
@@ -109,7 +109,7 @@ for material_key, material_profile in MATERIALS.items():
     PROFILE_FILES[f"{material_key}_filament"] = material_profile["filament"]
 
 # Disabled Ender 3: these are the loose vendor JSON files OrcaSlicer 2.4.2 shipped
-# under resources/profiles. OrcaSlicer 2.5.0 ships vendor presets only as binary
+# under resources/profiles. OrcaSlicer 2.5.0 and 2.5.1 ship vendor presets only as binary
 # <Vendor>.opc caches, so these paths do not exist in the pinned image,
 # ender_generic_profiles_ready() reports false and the printer cannot be enabled
 # until the owner commits a calibrated Ender 3 profile set (printers.json note).
