@@ -1,4 +1,4 @@
-> **Updated 2026-11-16:** the FDM slicing service built from this repository runs on the Workpiece server (as the `workpiece-fdm-legacy` container, per `docs/SYSTEM_MAP.md` in `workpiece-web`), not on Railway; whether the qualified Authority image itself is deployed there is not stated here; the Railway wording below was adjusted, the qualification content is unchanged.
+> **Updated 2026-11-16:** the FDM slicing service built from this repository runs on the Workpiece server (as the `workpiece-fdm-legacy-staging` container, per `docs/SYSTEM_MAP.md` in `workpiece-web`), not on Railway; whether the qualified Authority image itself is deployed there is not stated here; the Railway wording below was adjusted, the qualification content is unchanged.
 
 # FDM Authority v2 self-host path
 
