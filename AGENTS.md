@@ -1,10 +1,12 @@
 # Coding-agent repository rules
 
-Read `README.md`, [the bounded execution protocol](docs/AGENT-EXECUTION-PROTOCOL.md), and the relevant `docs/FDM_AUTHORITY_V2*.md` and qualification/release documents before substantive changes.
+How we work (reviews, CI, merging, publishing, evaluations, wording) is written once, in `docs/SYSTEM_MAP.md` section 0 of the private `workpiece-gr/workpiece-web` repository: read it first. This repository is public: never put host details, credentials, addresses or customer data here.
 
-- Follow approximately 25-minute bounded implementation sessions where practical, with real source/tests early and a precise checkpoint on completion or interruption.
-- Verify relevant branch heads once at the start, preserve other contributors' branches and authority records, prefer local focused tests over repeated CI, and make only one reasonable retry before documenting blockers.
-- Separate independent implementation and verification lanes; concurrent writes to the same branch or file are forbidden.
-- Maintain this repository's public GNU AGPL-3.0-or-later licensing, exact source offer, pinned toolchains, provenance and evidence identities.
+Before substantive changes read `README.md` and the relevant `docs/FDM_AUTHORITY_V2*.md` and qualification/release documents.
+
+This repository's own rules:
+
+- Maintain this repository's public GNU AGPL-3.0-or-later licensing, the exact source offer, pinned toolchains, provenance and evidence identities.
 - Never silently substitute an unqualified profile, slicer image or build for the exact reviewed source/authority. A passing CI or synthetic result does not qualify a real printer or production host.
-- Use focused PRs; do not merge failing changes or alter deployed services without the required explicit approval.
+- Keep the legacy slicing service and the qualified Authority separate; treat qualification and authority records as immutable.
+- Use focused PRs; do not merge failing changes and do not alter deployed services without the owner's explicit approval.

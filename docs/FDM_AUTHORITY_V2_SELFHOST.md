@@ -1,3 +1,5 @@
+> **Updated 2026-11-16:** the service runs on the Workpiece server, not on Railway; the Railway wording below was adjusted, the qualification content is unchanged.
+
 # FDM Authority v2 self-host path
 
 `Dockerfile.selfhost-authority` is the portable source-build path for Workpiece-owned Linux hosts and temporary providers that cannot pull the private GHCR packages.
@@ -6,9 +8,9 @@ It intentionally rebuilds the exact pinned base image and OrcaSlicer asset used 
 
 ## Intended uses
 
-- temporary Railway source build while private-registry pulls are unavailable;
+- a source build on the Workpiece server while private-registry pulls are unavailable (the service now runs on the Workpiece server; the old Railway deployment is retired);
 - future Workpiece-owned Linux fabrication server;
-- local parity and stress testing before cutting traffic away from Railway.
+- local parity and stress testing before any change of the running service.
 
 ## Safety boundary
 
