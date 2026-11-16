@@ -1,4 +1,4 @@
-> **Updated 2026-11-16:** the service runs on the Workpiece server, not on Railway; the Railway wording below was adjusted, the qualification content is unchanged.
+> **Updated 2026-11-16:** the FDM slicing service built from this repository runs on the Workpiece server (as the `workpiece-fdm-legacy` container, per `docs/SYSTEM_MAP.md` in `workpiece-web`), not on Railway; whether the qualified Authority image itself is deployed there is not stated here; the Railway wording below was adjusted, the qualification content is unchanged.
 
 # FDM Authority v2 self-host path
 
@@ -8,7 +8,7 @@ It intentionally rebuilds the exact pinned base image and OrcaSlicer asset used 
 
 ## Intended uses
 
-- a source build on the Workpiece server while private-registry pulls are unavailable (the service now runs on the Workpiece server; the old Railway deployment is retired);
+- a source build on the Workpiece server while private-registry pulls are unavailable (the legacy container now runs on the Workpiece server; the old Railway deployment is retired);
 - future Workpiece-owned Linux fabrication server;
 - local parity and stress testing before any change of the running service.
 
