@@ -1,7 +1,7 @@
 """Every material key has a recorded source, and each profile taken from OrcaSlicer says exactly what was changed.
 
 Failure modes: a material offered by the service without a profile or a source record; a printer listing a key the
-service cannot slice; a changed temperature or fan value that is not written down; a TPU temperature outside its
+service cannot slice; a changed temperature, fan or density value that is not written down; grams computed with a generic density; a TPU temperature outside its
 data-sheet range; a carbon-fibre variant that cools or flows harder than the Orca carbon-fibre cap it was derived with.
 """
 import json
@@ -48,6 +48,15 @@ def test_recorded_changes_are_what_the_profile_holds(key):
     for name, change in record["overrides"].items():
         assert profile[name] == [change["service"]], (key, name)
         assert change["orca"] != change["service"] and change["reason"]
+
+
+@pytest.mark.parametrize(
+    "key, density",
+    [("asa", 1.07), ("pc", 1.19), ("abs-cf", 1.08), ("asa-cf", 1.12), ("pa-cf", 1.24), ("petg-cf", 1.25), ("tpu-58d", 1.20), ("tpu-85a", 1.18)],
+)
+def test_added_materials_weigh_what_the_stocked_filament_weighs(key, density):
+    # Quoted grams are volume times the profile density: the website catalogue's data-sheet value, not Orca's generic one.
+    assert float(load(f"filament/{key}.json")["filament_density"][0]) == density
 
 
 @pytest.mark.parametrize("key, nozzle", [("tpu-58d", (230, 260)), ("tpu-85a", (220, 250))])
