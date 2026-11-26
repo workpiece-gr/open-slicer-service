@@ -13,19 +13,40 @@
       "catalogue_key": "PLA",
       "filament": "filament/pla.json",
       "process": "process/pla.json",
-      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)",
+      "overrides": {
+        "filament_density": {
+          "workshop": "1.24",
+          "service": "1.23",
+          "reason": "Workpiece catalogue density of the stocked filament (brand data sheet); quoted grams are volume times this"
+        }
+      }
     },
     "petg": {
       "catalogue_key": "PETG",
       "filament": "filament/petg.json",
       "process": "process/petg.json",
-      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)",
+      "overrides": {
+        "filament_density": {
+          "workshop": "1.25",
+          "service": "1.30",
+          "reason": "Workpiece catalogue density of the stocked filament (brand data sheet); quoted grams are volume times this"
+        }
+      }
     },
     "pctg": {
       "catalogue_key": "PCTG",
       "filament": "filament/pctg.json",
       "process": "process/pctg.json",
-      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)",
+      "overrides": {
+        "filament_density": {
+          "workshop": "1.25",
+          "service": "1.21",
+          "reason": "Workpiece catalogue density of the stocked filament (brand data sheet); quoted grams are volume times this"
+        }
+      }
     },
     "abs": {
       "catalogue_key": "ABS",
@@ -37,7 +58,14 @@
       "catalogue_key": "TPU-98A",
       "filament": "filament/tpu.json",
       "process": "process/tpu.json",
-      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)",
+      "overrides": {
+        "filament_density": {
+          "workshop": "1.24",
+          "service": "1.19",
+          "reason": "Workpiece catalogue density of the stocked filament (brand data sheet); quoted grams are volume times this"
+        }
+      }
     },
     "asa": {
       "catalogue_key": "ASA",

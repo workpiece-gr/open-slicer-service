@@ -52,9 +52,9 @@ def test_recorded_changes_are_what_the_profile_holds(key):
 
 @pytest.mark.parametrize(
     "key, density",
-    [("asa", 1.07), ("pc", 1.19), ("abs-cf", 1.08), ("asa-cf", 1.12), ("pa-cf", 1.24), ("petg-cf", 1.25), ("tpu-58d", 1.20), ("tpu-85a", 1.18)],
+    [("pla", 1.23), ("petg", 1.30), ("pctg", 1.21), ("abs", 1.04), ("tpu", 1.19), ("asa", 1.07), ("pc", 1.19), ("abs-cf", 1.08), ("asa-cf", 1.12), ("pa-cf", 1.24), ("petg-cf", 1.25), ("tpu-58d", 1.20), ("tpu-85a", 1.18)],
 )
-def test_added_materials_weigh_what_the_stocked_filament_weighs(key, density):
+def test_every_material_weighs_what_the_stocked_filament_weighs(key, density):
     # Quoted grams are volume times the profile density: the website catalogue's data-sheet value, not Orca's generic one.
     assert float(load(f"filament/{key}.json")["filament_density"][0]) == density
 
