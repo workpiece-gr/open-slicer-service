@@ -110,6 +110,8 @@ Unit tests run without OrcaSlicer: `pip install -r requirements.txt pytest httpx
 
 The `/v1/project` endpoint is the staged manufacturing-project builder. It is disabled by default and sits behind the same ApiGuard token and admission queue as `/v1/slice`. One OrcaSlicer process runs at a time per service process; the native reservation is held across export, inspection and verification. The guard's limits are deliberately **single-process**: deploy the reviewed single Uvicorn worker, never several replicas without separately reviewed shared admission accounting.
 
+The response reports `project.printed_rotations`: how the parts are turned in the exported file, as row-major 3×3 rotations from the uploaded STL frame to the bed frame, one per distinct orientation. It is measured from the meshes and checked against sampled facets; when that fails it is `null`, never a guess.
+
 It accepts one original STL plus quantity/material/quality/strength and:
 
 1. inspects the original STL envelope,
