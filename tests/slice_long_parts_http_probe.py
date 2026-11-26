@@ -115,10 +115,10 @@ if COMPARE_PROJECT and 'bar' in quotes:
 
 # Every material key must slice on the real binary (a profile Orca cannot load fails here, not for a customer),
 # and one carbon-fibre project (hardened-nozzle filament) must reopen in a fresh Orca process.
-with urllib.request.urlopen(urllib.request.Request(f'{URL}/health', headers={'Authorization':f'Bearer {TOKEN}'}), timeout=60) as response:
+with urllib.request.urlopen(f'{URL}/', timeout=60) as response:
     materials = list(json.load(response)['materials'])
 if len(materials) < 13:
-    failures.append(f'health lists only {materials}')
+    failures.append(f'the service lists only {materials}')
 for material in materials:
     status, result = post('/v1/slice', 'cube', (20,20,20), {'material':material,'quality':'balanced','strength':'functional','printer':'ratrig_vcore3_300','preview':'none'})
     summary = result.get('summary') or {}
