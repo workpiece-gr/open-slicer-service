@@ -13,7 +13,7 @@
       "temporary_generic": false,
       "envelope_mm": [300.0, 300.0, 300.0],
       "fit_rule": "controlled_ratrig_diagonal",
-      "materials": ["pla", "petg", "pctg", "abs", "tpu"],
+      "materials": ["pla", "petg", "pctg", "abs", "tpu", "asa", "pc", "abs-cf", "asa-cf", "pa-cf", "petg-cf", "tpu-58d", "tpu-85a"],
       "profile_source": "workpiece_profiles",
       "arrange_rotations": false,
       "layout_repair": true

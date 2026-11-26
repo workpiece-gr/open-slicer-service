@@ -1,0 +1,304 @@
+{
+  "schema": "workpiece-filament-sources/1",
+  "orca": {
+    "version": "2.5.1",
+    "tag": "v2.5.1",
+    "commit": "eef7710cb102fdb51a9bcdbd9efd61047f44774a",
+    "repository": "https://github.com/OrcaSlicer/OrcaSlicer",
+    "license": "AGPL-3.0",
+    "path_root": "resources/profiles"
+  },
+  "materials": {
+    "pla": {
+      "catalogue_key": "PLA",
+      "filament": "filament/pla.json",
+      "process": "process/pla.json",
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+    },
+    "petg": {
+      "catalogue_key": "PETG",
+      "filament": "filament/petg.json",
+      "process": "process/petg.json",
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+    },
+    "pctg": {
+      "catalogue_key": "PCTG",
+      "filament": "filament/pctg.json",
+      "process": "process/pctg.json",
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+    },
+    "abs": {
+      "catalogue_key": "ABS",
+      "filament": "filament/abs.json",
+      "process": "process/abs.json",
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+    },
+    "tpu": {
+      "catalogue_key": "TPU-98A",
+      "filament": "filament/tpu.json",
+      "process": "process/tpu.json",
+      "origin": "workshop bundle resolved against OrcaSlicer 2.4.2 bases (profiles/README.md)"
+    },
+    "asa": {
+      "catalogue_key": "ASA",
+      "filament": "filament/asa.json",
+      "process": "process/abs.json",
+      "origin": "orca",
+      "preset": "Generic ASA @RatRig",
+      "files": [
+        "Ratrig/filament/Generic ASA @RatRig.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_asa.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_common.json"
+      ],
+      "overrides": {},
+      "notes": []
+    },
+    "pc": {
+      "catalogue_key": "PC",
+      "filament": "filament/pc.json",
+      "process": "process/abs.json",
+      "origin": "orca",
+      "preset": "Generic PC @RatRig",
+      "files": [
+        "Ratrig/filament/Generic PC @RatRig.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_pc.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_common.json"
+      ],
+      "overrides": {},
+      "notes": []
+    },
+    "pa-cf": {
+      "catalogue_key": "PA-CF",
+      "filament": "filament/pa-cf.json",
+      "process": "process/abs.json",
+      "origin": "orca",
+      "preset": "Generic PA-CF @RatRig",
+      "files": [
+        "Ratrig/filament/Generic PA-CF @RatRig.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_pa.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_common.json"
+      ],
+      "overrides": {},
+      "notes": [
+        "Abrasive: hardened nozzle."
+      ]
+    },
+    "petg-cf": {
+      "catalogue_key": "PETG-CF",
+      "filament": "filament/petg-cf.json",
+      "process": "process/petg.json",
+      "origin": "orca",
+      "preset": "Generic PETG-CF @System",
+      "files": [
+        "OrcaFilamentLibrary/filament/Generic PETG-CF @System.json",
+        "OrcaFilamentLibrary/filament/Generic PETG-CF @base.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_pet.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_common.json"
+      ],
+      "overrides": {},
+      "notes": [
+        "No RatRig generic PETG-CF exists: the library @System preset is the nearest. It sets no pressure advance. Per-extruder-variant lists reduced to the first (Direct Drive Standard) entry.",
+        "Abrasive: hardened nozzle."
+      ]
+    },
+    "abs-cf": {
+      "catalogue_key": "ABS-CF",
+      "filament": "filament/abs-cf.json",
+      "process": "process/abs.json",
+      "origin": "orca",
+      "preset": "Generic ABS @RatRig",
+      "files": [
+        "Ratrig/filament/Generic ABS @RatRig.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_abs.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_common.json"
+      ],
+      "overrides": {
+        "fan_min_speed": {
+          "orca": "10",
+          "service": "5",
+          "reason": "CF delta: Orca Generic PETG-CF @System against Generic PETG @System, applied only where it lowers cooling or flow rate of this base"
+        },
+        "filament_max_volumetric_speed": {
+          "orca": "18",
+          "service": "11.5",
+          "reason": "CF delta: Orca Generic PETG-CF @System against Generic PETG @System, applied only where it lowers cooling or flow rate of this base"
+        },
+        "fan_cooling_layer_time": {
+          "orca": "10",
+          "service": "30",
+          "reason": "CF delta: the Generic PETG-CF value"
+        }
+      },
+      "notes": [
+        "No generic ABS-CF exists: Generic ABS plus CF deltas. filament_type stays ABS. Abrasive: hardened nozzle."
+      ]
+    },
+    "asa-cf": {
+      "catalogue_key": "ASA-CF",
+      "filament": "filament/asa-cf.json",
+      "process": "process/abs.json",
+      "origin": "orca",
+      "preset": "Generic ASA @RatRig",
+      "files": [
+        "Ratrig/filament/Generic ASA @RatRig.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_asa.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_common.json"
+      ],
+      "overrides": {
+        "fan_min_speed": {
+          "orca": "10",
+          "service": "5",
+          "reason": "CF delta: Orca Generic PETG-CF @System against Generic PETG @System, applied only where it lowers cooling or flow rate of this base"
+        },
+        "filament_max_volumetric_speed": {
+          "orca": "19",
+          "service": "11.5",
+          "reason": "CF delta: Orca Generic PETG-CF @System against Generic PETG @System, applied only where it lowers cooling or flow rate of this base"
+        },
+        "fan_cooling_layer_time": {
+          "orca": "10",
+          "service": "30",
+          "reason": "CF delta: the Generic PETG-CF value"
+        }
+      },
+      "notes": [
+        "No generic ASA-CF exists: Generic ASA plus CF deltas. filament_type stays ASA. Abrasive: hardened nozzle."
+      ]
+    },
+    "tpu-58d": {
+      "catalogue_key": "TPU-58D",
+      "filament": "filament/tpu-58d.json",
+      "process": "process/tpu.json",
+      "origin": "orca",
+      "preset": "Generic TPU @RatRig",
+      "files": [
+        "Ratrig/filament/Generic TPU @RatRig.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_tpu.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_common.json"
+      ],
+      "overrides": {
+        "nozzle_temperature": {
+          "orca": "220",
+          "service": "230",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: nozzle 230-260 C"
+        },
+        "nozzle_temperature_initial_layer": {
+          "orca": "220",
+          "service": "230",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: nozzle 230-260 C"
+        },
+        "nozzle_temperature_range_low": {
+          "orca": "200",
+          "service": "230",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: nozzle range"
+        },
+        "nozzle_temperature_range_high": {
+          "orca": "250",
+          "service": "260",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: nozzle range"
+        },
+        "cool_plate_temp": {
+          "orca": "30",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: bed 50-90 C"
+        },
+        "cool_plate_temp_initial_layer": {
+          "orca": "30",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: bed 50-90 C"
+        },
+        "eng_plate_temp": {
+          "orca": "30",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: bed 50-90 C"
+        },
+        "eng_plate_temp_initial_layer": {
+          "orca": "30",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: bed 50-90 C"
+        },
+        "hot_plate_temp": {
+          "orca": "35",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: bed 50-90 C"
+        },
+        "hot_plate_temp_initial_layer": {
+          "orca": "35",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: bed 50-90 C"
+        },
+        "textured_plate_temp": {
+          "orca": "35",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: bed 50-90 C"
+        },
+        "textured_plate_temp_initial_layer": {
+          "orca": "35",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Hard TDS 02.04.2024: bed 50-90 C"
+        }
+      },
+      "notes": []
+    },
+    "tpu-85a": {
+      "catalogue_key": "TPU-85A",
+      "filament": "filament/tpu-85a.json",
+      "process": "process/tpu.json",
+      "origin": "orca",
+      "preset": "Generic TPU @RatRig",
+      "files": [
+        "Ratrig/filament/Generic TPU @RatRig.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_tpu.json",
+        "OrcaFilamentLibrary/filament/base/fdm_filament_common.json"
+      ],
+      "overrides": {
+        "nozzle_temperature_range_low": {
+          "orca": "200",
+          "service": "220",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: nozzle range"
+        },
+        "cool_plate_temp": {
+          "orca": "30",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: bed 50-90 C"
+        },
+        "cool_plate_temp_initial_layer": {
+          "orca": "30",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: bed 50-90 C"
+        },
+        "eng_plate_temp": {
+          "orca": "30",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: bed 50-90 C"
+        },
+        "eng_plate_temp_initial_layer": {
+          "orca": "30",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: bed 50-90 C"
+        },
+        "hot_plate_temp": {
+          "orca": "35",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: bed 50-90 C"
+        },
+        "hot_plate_temp_initial_layer": {
+          "orca": "35",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: bed 50-90 C"
+        },
+        "textured_plate_temp": {
+          "orca": "35",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: bed 50-90 C"
+        },
+        "textured_plate_temp_initial_layer": {
+          "orca": "35",
+          "service": "50",
+          "reason": "Extrudr TPU Flex Semisoft TDS 02.04.2024: bed 50-90 C"
+        }
+      },
+      "notes": []
+    }
+  }
+}
