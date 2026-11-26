@@ -471,6 +471,144 @@ def repair_project_plate_layout(
     }
 
 
+def _stl_triangles(path: Path):
+    """Facets of a binary or ASCII STL, in file order, as three (x, y, z) points."""
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        header = handle.read(84)
+        count = struct.unpack("<I", header[80:84])[0] if len(header) == 84 else 0
+        if count > 0 and 84 + count * 50 == size:
+            for _ in range(count):
+                values = struct.unpack("<12fH", handle.read(50))
+                yield values[3:6], values[6:9], values[9:12]
+            return
+    corner = []
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            parts = line.split()
+            for index, word in enumerate(parts):
+                if word.lower() == "vertex":
+                    corner.append(tuple(float(value) for value in parts[index + 1 : index + 4]))
+                    if len(corner) == 3:
+                        yield tuple(corner)
+                        corner = []
+
+
+def _edges(triangle):
+    a, b, c = triangle
+    return [b[i] - a[i] for i in range(3)], [c[i] - a[i] for i in range(3)]
+
+
+def _cross(a, b):
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+
+
+def _frame(triangle):
+    """Orthonormal right-handed frame of a facet, or None for a degenerate one."""
+    first, second = _edges(triangle)
+    length = math.hypot(*first)
+    if length <= 1e-9:
+        return None
+    u = [value / length for value in first]
+    normal = _cross(u, second)
+    length = math.hypot(*normal)
+    if length <= 1e-9:
+        return None
+    n = [value / length for value in normal]
+    return u, _cross(n, u), n
+
+
+def _placed_triangles(payloads: dict, objects: dict, item) -> list:
+    """The facets of one build item in bed coordinates (without translation), in mesh order."""
+
+    def matrix(raw: str | None) -> list[float]:
+        values = [float(value) for value in (raw or "1 0 0 0 1 0 0 0 1 0 0 0").split()]
+        if len(values) != 12:
+            raise ValueError("invalid transform")
+        return values
+
+    def apply(values, point, translate):
+        x, y, z = point
+        return tuple(
+            x * values[axis] + y * values[3 + axis] + z * values[6 + axis] + (values[9 + axis] if translate else 0.0)
+            for axis in range(3)
+        )
+
+    def mesh(node, transform):
+        vertices = [
+            apply(transform, (float(v.attrib["x"]), float(v.attrib["y"]), float(v.attrib["z"])), True)
+            for v in node.iter()
+            if v.tag.rsplit("}", 1)[-1] == "vertex"
+        ]
+        return [
+            tuple(vertices[int(t.attrib[key])] for key in ("v1", "v2", "v3"))
+            for t in node.iter()
+            if t.tag.rsplit("}", 1)[-1] == "triangle"
+        ]
+
+    node = objects[item.attrib.get("objectid")]
+    components = [child for child in node if child.tag.rsplit("}", 1)[-1] == "components"]
+    if components:
+        facets = []
+        for component in components[0]:
+            target = next(value for key, value in component.attrib.items() if key.rsplit("}", 1)[-1] == "path")
+            root = ElementTree.fromstring(payloads(target.lstrip("/")))
+            part = next(
+                candidate for candidate in root.iter()
+                if candidate.tag.rsplit("}", 1)[-1] == "object" and candidate.attrib.get("id") == component.attrib.get("objectid")
+            )
+            facets.extend(mesh(part, matrix(component.attrib.get("transform"))))
+    else:
+        facets = mesh(node, matrix(None))
+    placement = matrix(item.attrib.get("transform"))
+    return [tuple(apply(placement, point, False) for point in facet) for facet in facets]
+
+
+def printed_rotations(project_path: Path, source_path: Path, *, samples: int = 64) -> list[list[float]] | None:
+    """How the parts are turned in the exported project: row-major 3x3 rotations from the source STL frame to the bed frame, one per
+    distinct orientation. Measured from the meshes (same facets in the same order), so it holds whether Orca stores the rotation in a
+    transform or bakes it into the vertices, and every result is checked against sampled facets. None when it cannot be established."""
+    try:
+        total, reference, area = 0, 0, 0.0
+        for index, facet in enumerate(_stl_triangles(source_path)):
+            total += 1
+            size = math.hypot(*_cross(*_edges(facet)))
+            if size > area:
+                reference, area = index, size
+        if not total or area <= 0:
+            return None
+        wanted = {reference, *range(0, total, max(1, total // samples))}
+        source = {index: facet for index, facet in enumerate(_stl_triangles(source_path)) if index in wanted}
+        from_frame = _frame(source[reference])
+        found: list[list[float]] = []
+        with zipfile.ZipFile(project_path) as archive:
+            root = ElementTree.fromstring(archive.read("3D/3dmodel.model"))
+            objects = {n.attrib.get("id"): n for n in root.iter() if n.tag.rsplit("}", 1)[-1] == "object"}
+            items = [n for n in root.iter() if n.tag.rsplit("}", 1)[-1] == "item"]
+            for item in items:
+                placed = _placed_triangles(archive.read, objects, item)
+                if len(placed) != total:
+                    return None
+                to_frame = _frame(placed[reference])
+                if from_frame is None or to_frame is None:
+                    return None
+                rotation = [
+                    [sum(to_frame[k][row] * from_frame[k][column] for k in range(3)) for column in range(3)]
+                    for row in range(3)
+                ]
+                for index, facet in source.items():
+                    for before, after in zip(_edges(facet), _edges(placed[index])):
+                        turned = [sum(rotation[row][column] * before[column] for column in range(3)) for row in range(3)]
+                        if math.dist(turned, after) > 0.01 + 1e-4 * math.hypot(*before):
+                            return None
+                flat = [round(value, 6) + 0.0 for row in rotation for value in row]
+                if not any(max(abs(a - b) for a, b in zip(flat, other)) <= 1e-4 for other in found):
+                    found.append(flat)
+        return found or None
+    except Exception:  # a report only: an unreadable mesh never fails the project
+        return None
+
+
 def build_project_command(
     *,
     orca_bin: Path,

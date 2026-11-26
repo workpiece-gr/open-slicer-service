@@ -29,6 +29,7 @@ from .project_builder import (
     build_project_command,
     inspect_project_3mf,
     inspect_stl,
+    printed_rotations,
     repair_project_plate_layout,
     sha256_file,
     verify_project_command,
@@ -998,6 +999,9 @@ async def build_project(
                 "total_filament_grams": round(total_filament, 3),
             }
 
+        # Read after the layout repair, so it is the orientation actually in the exported file.
+        rotations = printed_rotations(project_path, input_path)
+
         geometry_messages = []
         if layout_repair:
             geometry_messages.extend(layout_repair.get("warnings") or [])
@@ -1060,6 +1064,7 @@ async def build_project(
                 "sha256": sha256_file(project_path),
                 "inspection": project_inspection,
                 "layout_repair": layout_repair,
+                "printed_rotations": rotations,
             },
             "verification": verification,
             "warnings": project_warnings,
@@ -1087,6 +1092,7 @@ async def build_project(
                     "bytes": payload["project"]["bytes"],
                     "sha256": payload["project"]["sha256"],
                     "inspection": compact_inspection,
+                    "printed_rotations": rotations,
                     "layout_repair": {
                         "applied": layout_repair is not None,
                         "plate_count": layout_repair.get("plate_count") if layout_repair else None,

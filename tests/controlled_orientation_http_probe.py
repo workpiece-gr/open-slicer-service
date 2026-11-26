@@ -52,4 +52,16 @@ for name, dimensions, expected in [
         expected_diagonal = 1 if name in ('low-rod','long-tall-rod') else 0
         if stability['adjustedInstanceCount'] != expected_adjusted or stability['diagonalInstanceCount'] != expected_diagonal:
             failures.append(f'{name}: unexpected controlled orientation evidence')
+        # The reported rotation, applied to the uploaded box, must give the footprint that was placed on the bed.
+        rotations = result['project']['printed_rotations']
+        print(json.dumps({'fixture':name,'printed_rotations':rotations}),flush=True)
+        if not rotations or len(rotations) != 1:
+            failures.append(f'{name}: printed rotation not reported')
+        else:
+            corners = [(a,b,c) for a in (0,dimensions[0]) for b in (0,dimensions[1]) for c in (0,dimensions[2])]
+            turned = [[sum(rotations[0][r*3+k]*p[k] for k in range(3)) for p in corners] for r in range(3)]
+            sizes = [max(row)-min(row) for row in turned]
+            placed = result['project']['layout_repair']['placements'][0]['footprint_mm']
+            if any(abs(a-b) > 0.1 for a,b in zip(sizes, placed)):
+                failures.append(f'{name}: reported rotation gives {sizes}, placed {placed}')
 assert not failures, '; '.join(failures)
