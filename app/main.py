@@ -77,32 +77,26 @@ PREVIEW_MODES = ("moves", "none")
 NATIVE = NativeSupervisor()
 GUARD: dict[str, ApiGuard] = {}
 
+def _material(label: str, process: str, filament: str) -> dict:
+    return {"label": label, "process": PROFILE_ROOT / "process" / f"{process}.json", "filament": PROFILE_ROOT / "filament" / f"{filament}.json"}
+
+
+# Material key -> profiles. The newer materials share a family's process profile and add their own filament profile;
+# profiles/filament-sources.json records each key's catalogue name, OrcaSlicer source files and every changed value.
 MATERIALS = {
-    "pla": {
-        "label": "PLA",
-        "process": PROFILE_ROOT / "process" / "pla.json",
-        "filament": PROFILE_ROOT / "filament" / "pla.json",
-    },
-    "petg": {
-        "label": "PETG",
-        "process": PROFILE_ROOT / "process" / "petg.json",
-        "filament": PROFILE_ROOT / "filament" / "petg.json",
-    },
-    "pctg": {
-        "label": "PCTG",
-        "process": PROFILE_ROOT / "process" / "pctg.json",
-        "filament": PROFILE_ROOT / "filament" / "pctg.json",
-    },
-    "abs": {
-        "label": "ABS",
-        "process": PROFILE_ROOT / "process" / "abs.json",
-        "filament": PROFILE_ROOT / "filament" / "abs.json",
-    },
-    "tpu": {
-        "label": "TPU",
-        "process": PROFILE_ROOT / "process" / "tpu.json",
-        "filament": PROFILE_ROOT / "filament" / "tpu.json",
-    },
+    "pla": _material("PLA", "pla", "pla"),
+    "petg": _material("PETG", "petg", "petg"),
+    "pctg": _material("PCTG", "pctg", "pctg"),
+    "abs": _material("ABS", "abs", "abs"),
+    "tpu": _material("TPU", "tpu", "tpu"),
+    "asa": _material("ASA", "abs", "asa"),
+    "pc": _material("PC", "abs", "pc"),
+    "abs-cf": _material("ABS-CF", "abs", "abs-cf"),
+    "asa-cf": _material("ASA-CF", "abs", "asa-cf"),
+    "pa-cf": _material("PA-CF", "abs", "pa-cf"),
+    "petg-cf": _material("PETG-CF", "petg", "petg-cf"),
+    "tpu-58d": _material("TPU 58D", "tpu", "tpu-58d"),
+    "tpu-85a": _material("TPU 85A", "tpu", "tpu-85a"),
 }
 PROFILE_FILES = {"machine": PROFILE_ROOT / "machine.json"}
 for material_key, material_profile in MATERIALS.items():

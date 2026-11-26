@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.main import (
+    MATERIALS,
     absolute_first_layer_line_width,
     build_process_profile,
     machine_nozzle_diameter_mm,
@@ -91,7 +92,7 @@ def test_resolved_profile_matrix():
     expected = {
         profile_root / "machine.json": "machine",
         **{profile_root / "process" / f"{name}.json": "process" for name in ("pla", "petg", "pctg", "abs", "tpu")},
-        **{profile_root / "filament" / f"{name}.json": "filament" for name in ("pla", "petg", "pctg", "abs", "tpu")},
+        **{profile_root / "filament" / f"{name}.json": "filament" for name in MATERIALS},
     }
     for path, profile_type in expected.items():
         profile = json.loads(path.read_text(encoding="utf-8"))

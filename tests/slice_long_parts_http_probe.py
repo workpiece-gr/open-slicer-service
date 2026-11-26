@@ -113,4 +113,22 @@ if COMPARE_PROJECT and 'bar' in quotes:
         if abs(quoted - delivered) > 0.05 * max(quoted, delivered):
             failures.append(f'bar-project: quoted {quoted} g but the project verification reports {delivered} g')
 
+# Every material key must slice on the real binary (a profile Orca cannot load fails here, not for a customer),
+# and one carbon-fibre project (hardened-nozzle filament) must reopen in a fresh Orca process.
+with urllib.request.urlopen(f'{URL}/', timeout=60) as response:
+    materials = list(json.load(response)['materials'])
+if len(materials) < 13:
+    failures.append(f'the service lists only {materials}')
+for material in materials:
+    status, result = post('/v1/slice', 'cube', (20,20,20), {'material':material,'quality':'balanced','strength':'functional','printer':'ratrig_vcore3_300','preview':'none'})
+    summary = result.get('summary') or {}
+    print(json.dumps({'material':material,'status':status,'detail':result.get('detail'),'summary':{k: summary.get(k) for k in ('print_time_seconds','filament_grams','layer_count')}}),flush=True)
+    if status != 200 or not (summary.get('print_time_seconds') and summary.get('filament_grams') and summary.get('layer_count')):
+        failures.append(f'{material}: did not slice: {status} {result.get("detail")}')
+if COMPARE_PROJECT:
+    for material in ('pa-cf', 'petg-cf'):
+        status, project = post('/v1/project', 'cube', (20,20,20), {'material':material,'quality':'balanced','strength':'functional','quantity':'1','printer':'ratrig_vcore3_300','verify':'true'})
+        if status != 200 or not (project.get('verification') or {}).get('reopened_in_fresh_orca_process'):
+            failures.append(f'{material}-project: {status} {project.get("detail")}')
+
 assert not failures, '; '.join(failures)
