@@ -41,7 +41,8 @@ Routing (`routing.rule = smallest_capable`): with `printer=auto` the request goe
 profiles/printers.json
 profiles/machine.json
 profiles/process/{pla,petg,pctg,abs,tpu}.json
-profiles/filament/{pla,petg,pctg,abs,tpu}.json
+profiles/filament-sources.json
+profiles/filament/{pla,petg,pctg,abs,tpu,asa,pc,abs-cf,asa-cf,pa-cf,petg-cf,tpu-58d,tpu-85a}.json
 ```
 
 Validate the resulting G-code in the OrcaSlicer desktop preview and with controlled test prints before treating it as production output. Each request slices one STL with one selected material.
@@ -74,7 +75,7 @@ curl -H "Authorization: Bearer local-dev-token" \
 
 Quality controls layer height; strength controls wall count. Infill remains fixed at 20% so the two controls stay independent. Supports are automatic tree supports, the same setting the project path uses, and the result reports `summary.support_grams` and `summary.supports_used` from the exact G-code roles.
 
-Supported material keys are `pla`, `petg`, `pctg`, `abs`, and `tpu`.
+Supported material keys are `pla`, `petg`, `pctg`, `abs`, `tpu` (98A), `asa`, `pc`, `abs-cf`, `asa-cf`, `pa-cf`, `petg-cf`, `tpu-58d` and `tpu-85a`; their sources are recorded in `profiles/filament-sources.json`.
 
 | Setting | Result |
 | --- | --- |
